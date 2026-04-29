@@ -1,0 +1,10 @@
+<?php
+
+/**
+ * @file
+ * Pagedesigner Export/Import module.
+ *
+ * Provides Drush commands to export and import Pagedesigner element trees
+ * with full translation support. Supports both surgical restore (preserve IDs)
+ * and cloning (new IDs) workflows.
+ */

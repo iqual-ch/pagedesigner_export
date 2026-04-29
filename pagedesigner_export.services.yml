@@ -1,0 +1,18 @@
+services:
+  pagedesigner_export.exporter:
+    class: Drupal\pagedesigner_export\Service\Exporter
+    arguments:
+      - '@entity_type.manager'
+      - '@logger.factory'
+      - '@language_manager'
+
+  pagedesigner_export.importer:
+    class: Drupal\pagedesigner_export\Service\Importer
+    arguments:
+      - '@entity_type.manager'
+      - '@pagedesigner_export.id_mapper'
+      - '@logger.factory'
+      - '@language_manager'
+
+  pagedesigner_export.id_mapper:
+    class: Drupal\pagedesigner_export\Service\IdMapper

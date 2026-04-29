@@ -1,0 +1,6 @@
+services:
+  pagedesigner_export.commands:
+    class: Drupal\pagedesigner_export\Commands\PagedesignerExportCommands
+    tags:
+      - { name: drush.command }
+    arguments: ['@pagedesigner_export.exporter', '@pagedesigner_export.importer']

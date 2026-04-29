@@ -1,0 +1,8 @@
+name: Pagedesigner Export/Import
+description: Export and import Pagedesigner element trees with full translation support. Supports surgical restore (preserve IDs) and cloning (new IDs).
+package: Pagedesigner
+type: module
+core_version_requirement: ^10.3 || ^11
+dependencies:
+  - drupal:node
+  - pagedesigner
