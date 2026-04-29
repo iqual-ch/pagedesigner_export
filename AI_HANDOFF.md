@@ -151,3 +151,27 @@ PY
 3. Preserve mode with existing collisions and with free IDs.
 4. Imports with sanitize-local-urls on/off.
 5. Repeat clone imports on same node to verify expected accumulation behavior.
+6. Overlay: single-language export → overlay onto existing tree → verify translations added.
+7. Overlay: mismatched tree sizes (extra children in export vs target) → warnings logged.
+8. Overlay: node translation field correctly updated to point to default container.
+
+## Overlay Mode
+
+### Purpose
+
+Overlay mode (`--mode=overlay`) adds a single-language translation to an existing element tree. This addresses the "separate container per language" bug where each translation got its own container instead of sharing translations on the same elements.
+
+### How it works
+
+1. Export: Use `--only-langcode=fr` to export only the specified language's tree.
+2. Import: Use `--mode=overlay --target-node=NID --target-field=FIELD --target-langcode=fr`.
+3. The importer loads the target node's existing default-language tree.
+4. It structurally maps exported elements → existing elements by tree position (root→root, children by index).
+5. For each matched pair, it adds/updates the target language translation on the existing element.
+6. Finally, it updates the node translation's pagedesigner field to point to the default container (fixing the separate-container-per-language issue).
+
+### Limitations
+
+- Tree matching is positional (by child order). If the exported tree structure diverges significantly from the target, results may be incomplete.
+- Style references (`field_styles`) are also matched positionally.
+- Mismatches log warnings but do not abort the import.

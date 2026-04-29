@@ -29,14 +29,19 @@ class Exporter {
   ) {}
 
   /**
-   * Export a pagedesigner element tree and all translations.
+   * Export a pagedesigner element tree and all (or one) translations.
    *
    * @param int $elementId
    *   The root element ID to export.
    * @param string $langcode
-   *   The default language code (will include all translations).
+   *   The default language code (will include all translations unless
+   *   $onlyLangcode is set).
    * @param bool $sanitizeLocalUrls
    *   Whether absolute local URLs should be converted to relative paths.
+   * @param string|null $onlyLangcode
+   *   If set, export only this single language per element. The tree is
+   *   traversed using this language's children structure. Useful for
+   *   single-translation overlay workflows.
    *
    * @return array
    *   Structured export data containing all elements and translations.
@@ -44,7 +49,7 @@ class Exporter {
    * @throws \Exception
    *   If element cannot be loaded.
    */
-  public function export(int $elementId, string $langcode = 'de', bool $sanitizeLocalUrls = TRUE): array {
+  public function export(int $elementId, string $langcode = 'de', bool $sanitizeLocalUrls = TRUE, ?string $onlyLangcode = NULL): array {
     /** @var \Drupal\pagedesigner\Entity\Element $root */
     $root = $this->entityTypeManager->getStorage('pagedesigner_element')->load($elementId);
     if (!$root) {
@@ -52,27 +57,45 @@ class Exporter {
     }
 
     $logger = $this->loggerFactory->get('pagedesigner_export');
-    $allLanguages = array_keys($this->languageManager->getLanguages());
     $defaultLangcode = $langcode;
 
-    // Build a map of all element IDs in the tree for all available languages.
-    $elementIds = [];
-    foreach ($allLanguages as $langcode) {
-      if ($root->hasTranslation($langcode)) {
-        $visited = [];
-        $elementIds = array_merge($elementIds, $this->collectElementIds($root, $langcode, $visited));
+    if ($onlyLangcode) {
+      // Single-language export: traverse only the specified language's tree.
+      if (!$root->hasTranslation($onlyLangcode)) {
+        throw new \Exception("Root element {$elementId} has no translation for '{$onlyLangcode}'.");
       }
+      $visited = [];
+      $elementIds = $this->collectElementIds($root, $onlyLangcode, $visited);
+      $elementIds = array_values(array_unique($elementIds));
+      $languagesToExport = [$onlyLangcode];
+      $logger->notice("Exporting " . count($elementIds) . " elements from tree (root: {$elementId}, language: {$onlyLangcode}).");
     }
-    $elementIds = array_values(array_unique($elementIds));
-    $logger->notice("Exporting " . count($elementIds) . " elements from tree (root: " . $elementId . ").");
+    else {
+      // Full export: traverse all languages and union element IDs.
+      $allLanguages = array_keys($this->languageManager->getLanguages());
+      $elementIds = [];
+      foreach ($allLanguages as $lang) {
+        if ($root->hasTranslation($lang)) {
+          $visited = [];
+          $elementIds = array_merge($elementIds, $this->collectElementIds($root, $lang, $visited));
+        }
+      }
+      $elementIds = array_values(array_unique($elementIds));
+      $languagesToExport = $allLanguages;
+      $logger->notice("Exporting " . count($elementIds) . " elements from tree (root: {$elementId}).");
+    }
 
-    // Export each element with all its translations.
+    // Export each element with the appropriate translations.
     $data = [
       'root_id' => $elementId,
       'default_langcode' => $defaultLangcode,
       'exported_at' => time(),
       'elements' => [],
     ];
+
+    if ($onlyLangcode) {
+      $data['only_langcode'] = $onlyLangcode;
+    }
 
     foreach ($elementIds as $eid) {
       /** @var \Drupal\pagedesigner\Entity\Element $element */
@@ -84,8 +107,8 @@ class Exporter {
 
       $elementData = [];
 
-      // Export each translation.
-      foreach ($allLanguages as $lang) {
+      // Export each requested translation.
+      foreach ($languagesToExport as $lang) {
         if ($element->hasTranslation($lang)) {
           $translation = $element->getTranslation($lang);
           $elementData[$lang] = $this->exportTranslation($translation, $sanitizeLocalUrls);

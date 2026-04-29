@@ -40,6 +40,10 @@ class PagedesignerExportCommands extends DrushCommands {
    *   File path to save JSON (if not provided, outputs to stdout).
    * @option langcode
    *   Default language code (default: de).
+   * @option only-langcode
+   *   Export only this single language per element (for overlay workflows).
+   *   When set, the tree is traversed using this language's children structure
+   *   and only this language's data is included in the export.
    * @option sanitize-local-urls
    *   Convert absolute local URLs (localhost, 127.0.0.1, *.ddev.site) in
    *   exported field payloads to relative paths. Default: TRUE.
@@ -49,6 +53,8 @@ class PagedesignerExportCommands extends DrushCommands {
    *   Export to file.
    * @usage drush pd:export 242821 --field=field_pd_manual_content --output=/tmp/tree.json
    *   Export with field hint and save to file.
+   * @usage drush pd:export 242821 --only-langcode=fr --output=/tmp/tree-fr.json
+   *   Export only the French translation.
    */
   public function export(
     int $elementId,
@@ -56,6 +62,7 @@ class PagedesignerExportCommands extends DrushCommands {
       'field' => NULL,
       'output' => NULL,
       'langcode' => 'de',
+      'only-langcode' => NULL,
       'sanitize-local-urls' => TRUE,
     ],
   ): void {
@@ -63,7 +70,8 @@ class PagedesignerExportCommands extends DrushCommands {
       $this->logger()->notice('Exporting element @id...', ['@id' => $elementId]);
 
       $sanitizeLocalUrls = $this->optionToBool($options['sanitize-local-urls'] ?? TRUE);
-      $data = $this->exporter->export($elementId, $options['langcode'], $sanitizeLocalUrls);
+      $onlyLangcode = $options['only-langcode'] ?? NULL;
+      $data = $this->exporter->export($elementId, $options['langcode'], $sanitizeLocalUrls, $onlyLangcode);
 
       $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
       if (!$json) {
@@ -102,11 +110,15 @@ class PagedesignerExportCommands extends DrushCommands {
    * @option target-field
    *   Target pagedesigner field name (required for clone mode).
    * @option mode
-   *   Import mode: 'preserve' (default) or 'clone'.
+   *   Import mode: 'preserve' (default), 'clone', or 'overlay'.
    * @option skip-existing
    *   Skip elements that already exist.
    * @option dry-run
    *   Validate without writing.
+   * @option target-langcode
+   *   Target language code for overlay mode (required for overlay mode).
+   *   The exported content will be added as this language's translation
+   *   on the existing element tree.
    * @option sanitize-local-urls
    *   Convert absolute local URLs (localhost, 127.0.0.1, *.ddev.site) from
    *   imported field payloads to relative paths. Default: TRUE.
@@ -116,6 +128,8 @@ class PagedesignerExportCommands extends DrushCommands {
    *   Validate import without writing.
    * @usage drush pd:import /tmp/export.json --mode=clone --target-node=516014 --target-field=field_pd_manual_content
    *   Clone to node 516014 with new IDs.
+   * @usage drush pd:import /tmp/tree-fr.json --mode=overlay --target-node=516014 --target-field=field_pd_manual_content --target-langcode=fr
+   *   Overlay French translation onto existing tree of node 516014.
    */
   public function import(
     string $jsonFile,
@@ -125,6 +139,7 @@ class PagedesignerExportCommands extends DrushCommands {
       'mode' => 'preserve',
       'skip-existing' => FALSE,
       'dry-run' => FALSE,
+      'target-langcode' => NULL,
       'sanitize-local-urls' => TRUE,
     ],
   ): void {
@@ -153,6 +168,9 @@ class PagedesignerExportCommands extends DrushCommands {
       }
       if ($options['target-field']) {
         $importOptions['target_field'] = $options['target-field'];
+      }
+      if ($options['target-langcode']) {
+        $importOptions['target_langcode'] = $options['target-langcode'];
       }
 
       $result = $this->importer->import($data, $importOptions);
