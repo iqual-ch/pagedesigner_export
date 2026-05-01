@@ -362,6 +362,8 @@ class Importer {
     }
 
     // Get one language's data to extract type and basic info.
+    // Use the first language from the export as the base language so that
+    // Drupal stores data in the correct translation slot from the start.
     $firstLang = array_key_first($elementData);
     $firstData = $elementData[$firstLang];
 
@@ -372,6 +374,7 @@ class Importer {
               'type' => $firstData['type'],
               'name' => $firstData['name'],
               'status' => $firstData['status'] ?? TRUE,
+              'langcode' => $firstLang,
             ]
         );
       // Force the ID before save.
