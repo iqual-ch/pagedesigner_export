@@ -62,8 +62,8 @@ class Importer {
     $dryRun = $options['dry_run'] ?? FALSE;
     $sanitizeLocalUrls = $options['sanitize_local_urls'] ?? TRUE;
 
-    if (!in_array($mode, ['preserve', 'clone'])) {
-      throw new \Exception("Invalid mode: {$mode}. Must be 'preserve' or 'clone'.");
+    if (!in_array($mode, ['preserve', 'clone', 'overlay'])) {
+      throw new \Exception("Invalid mode: {$mode}. Must be 'preserve', 'clone', or 'overlay'.");
     }
 
     if ($mode === 'clone') {
@@ -71,6 +71,23 @@ class Importer {
       $targetField = $options['target_field'] ?? NULL;
       if (!$targetNid || !$targetField) {
         throw new \Exception("Mode 'clone' requires 'target_nid' and 'target_field' options.");
+      }
+
+      $targetNode = $this->entityTypeManager->getStorage('node')->load($targetNid);
+      if (!$targetNode instanceof NodeInterface) {
+        throw new \Exception("Target node {$targetNid} not found.");
+      }
+      if (!$targetNode->hasField($targetField)) {
+        throw new \Exception("Target node does not have field '{$targetField}'.");
+      }
+    }
+
+    if ($mode === 'overlay') {
+      $targetNid = $options['target_nid'] ?? NULL;
+      $targetField = $options['target_field'] ?? NULL;
+      $targetLangcode = $options['target_langcode'] ?? NULL;
+      if (!$targetNid || !$targetField || !$targetLangcode) {
+        throw new \Exception("Mode 'overlay' requires 'target_nid', 'target_field', and 'target_langcode' options.");
       }
 
       $targetNode = $this->entityTypeManager->getStorage('node')->load($targetNid);
@@ -118,7 +135,18 @@ class Importer {
 
     if ($dryRun) {
       $logger->notice('DRY RUN: Validating ' . count($data['elements']) . ' elements...');
-      // Just validate structure, don't import.
+      if ($mode === 'overlay') {
+        // Validate overlay mapping by building it without writing.
+        $existingRootId = $this->getExistingRootId($targetNode, $targetField);
+        $existingRoot = $this->entityTypeManager->getStorage('pagedesigner_element')->load($existingRootId);
+        if (!$existingRoot) {
+          throw new \Exception("Existing root element {$existingRootId} not found.");
+        }
+        $exportLangcode = $this->detectExportLangcode($data);
+        $mapping = [];
+        $this->buildTreeMapping($data, (int) $data['root_id'], $exportLangcode, $existingRoot, $targetNode->language()->getId(), $mapping, $logger);
+        $logger->notice("Overlay mapping built: " . count($mapping) . " elements matched.");
+      }
       $result['success'] = TRUE;
       return $result;
     }
@@ -165,7 +193,7 @@ class Importer {
           }
         }
       }
-      else {
+      elseif ($mode === 'clone') {
         if ($skipExisting) {
           $logger->notice('skip_existing is ignored in clone mode; clone mode always creates new elements.');
         }
@@ -214,8 +242,13 @@ class Importer {
           $logger->notice("Updated target node {$targetNid} field {$targetField} to new root {$newRootId}");
         }
       }
+      elseif ($mode === 'overlay') {
+        // Overlay mode: add a translation to existing elements by
+        // structurally mapping the exported tree to the target tree.
+        $result = $this->importOverlay($data, $targetLangcode, $targetNid, $targetField, $sanitizeLocalUrls, $targetNode);
+      }
 
-      if ($mode !== 'clone') {
+      if ($mode !== 'clone' && $mode !== 'overlay') {
         $result['root_id'] = $data['root_id'];
       }
 
@@ -329,6 +362,8 @@ class Importer {
     }
 
     // Get one language's data to extract type and basic info.
+    // Use the first language from the export as the base language so that
+    // Drupal stores data in the correct translation slot from the start.
     $firstLang = array_key_first($elementData);
     $firstData = $elementData[$firstLang];
 
@@ -339,6 +374,7 @@ class Importer {
               'type' => $firstData['type'],
               'name' => $firstData['name'],
               'status' => $firstData['status'] ?? TRUE,
+              'langcode' => $firstLang,
             ]
         );
       // Force the ID before save.
@@ -624,6 +660,344 @@ class Importer {
     $query = isset($parts['query']) ? '?' . $parts['query'] : '';
     $fragment = isset($parts['fragment']) ? '#' . $parts['fragment'] : '';
     return $path . $query . $fragment;
+  }
+
+  /**
+   * Import a single translation as an overlay onto an existing element tree.
+   *
+   * Structurally maps exported elements to existing elements on the target
+   * node (by tree position), then adds/updates the target language translation
+   * on each matched element. Finally updates the node translation's field to
+   * point to the default container so the separate-per-language container
+   * error is corrected.
+   *
+   * @param array $data
+   *   The export data array.
+   * @param string $targetLangcode
+   *   The language code to create/update on existing elements.
+   * @param int $targetNid
+   *   The target node ID.
+   * @param string $targetField
+   *   The pagedesigner field name on the target node.
+   * @param bool $sanitizeLocalUrls
+   *   Whether absolute local URLs should be converted to relative paths.
+   * @param \Drupal\node\NodeInterface $targetNode
+   *   The already-loaded target node.
+   *
+   * @return array
+   *   Result array with keys: success, created_count, updated_count, errors, root_id.
+   *
+   * @throws \Exception
+   */
+  protected function importOverlay(array $data, string $targetLangcode, int $targetNid, string $targetField, bool $sanitizeLocalUrls, NodeInterface $targetNode): array {
+    $storage = $this->entityTypeManager->getStorage('pagedesigner_element');
+    $logger = $this->loggerFactory->get('pagedesigner_export');
+
+    $result = [
+      'success' => FALSE,
+      'created_count' => 0,
+      'updated_count' => 0,
+      'errors' => [],
+      'root_id' => NULL,
+    ];
+
+    // Determine the existing root container from the node's default language.
+    $existingRootId = $this->getExistingRootId($targetNode, $targetField);
+
+    /** @var \Drupal\pagedesigner\Entity\Element|null $existingRoot */
+    $existingRoot = $storage->load($existingRootId);
+    if (!$existingRoot) {
+      throw new \Exception("Existing root element {$existingRootId} not found.");
+    }
+
+    // Detect the language used in the export.
+    $exportLangcode = $this->detectExportLangcode($data);
+    $defaultLangcode = $targetNode->language()->getId();
+
+    $logger->notice("Overlay: mapping exported tree (lang: {$exportLangcode}) onto existing tree (root: {$existingRootId}) as '{$targetLangcode}' translation.");
+
+    // Build a structural mapping: exported_element_id => existing_element_id.
+    $mapping = [];
+    $this->buildTreeMapping($data, (int) $data['root_id'], $exportLangcode, $existingRoot, $defaultLangcode, $mapping, $logger);
+
+    $logger->notice("Overlay: matched " . count($mapping) . " elements.");
+
+    // Apply translations using the mapping.
+    foreach ($mapping as $exportedId => $existingId) {
+      $exportedData = $data['elements'][$exportedId] ?? NULL;
+      if (!$exportedData) {
+        continue;
+      }
+
+      $langData = $exportedData[$exportLangcode] ?? NULL;
+      if (!$langData) {
+        continue;
+      }
+
+      /** @var \Drupal\pagedesigner\Entity\Element|null $element */
+      $element = $storage->load($existingId);
+      if (!$element) {
+        $result['errors'][] = "Could not load existing element {$existingId}.";
+        continue;
+      }
+
+      try {
+        // Add or update translation.
+        if ($element->hasTranslation($targetLangcode)) {
+          $translation = $element->getTranslation($targetLangcode);
+        }
+        else {
+          $element->addTranslation($targetLangcode, $element->toArray());
+          $translation = $element->getTranslation($targetLangcode);
+        }
+
+        $translation->set('name', $langData['name']);
+        $translation->set('status', $langData['status'] ?? TRUE);
+
+        // Set container reference using the mapping.
+        if (array_key_exists('container', $langData)) {
+          if ($langData['container'] === NULL || $langData['container'] === '') {
+            $translation->set('container', NULL);
+          }
+          else {
+            $mappedContainer = $mapping[(int) $langData['container']] ?? NULL;
+            if ($mappedContainer) {
+              $translation->set('container', $mappedContainer);
+            }
+          }
+        }
+
+        // Set parent reference using the mapping.
+        if (array_key_exists('parent', $langData)) {
+          if ($langData['parent'] === NULL || $langData['parent'] === '') {
+            $translation->set('parent', NULL);
+          }
+          else {
+            $mappedParent = $mapping[(int) $langData['parent']] ?? NULL;
+            if ($mappedParent) {
+              $translation->set('parent', $mappedParent);
+            }
+          }
+        }
+
+        // Set children references using the mapping.
+        if (isset($langData['children']) && is_array($langData['children'])) {
+          $newChildren = [];
+          foreach ($langData['children'] as $childRef) {
+            $oldChildId = $childRef['target_id'] ?? NULL;
+            if ($oldChildId && isset($mapping[(int) $oldChildId])) {
+              $newChildren[] = ['target_id' => $mapping[(int) $oldChildId]];
+            }
+          }
+          $translation->set('children', $newChildren);
+        }
+
+        // Set custom fields.
+        if (isset($langData['fields'])) {
+          foreach ($langData['fields'] as $fieldName => $fieldValues) {
+            if (!$translation->hasField($fieldName)) {
+              continue;
+            }
+
+            if ($sanitizeLocalUrls) {
+              $fieldValues = $this->sanitizeFieldValues($fieldValues);
+            }
+
+            // Remap entity references to pagedesigner elements.
+            $definition = $translation->getFieldDefinition($fieldName);
+            if ($definition->getType() === 'entity_reference' && $definition->getSetting('target_type') === 'pagedesigner_element') {
+              $mappedValues = [];
+              foreach ($fieldValues as $item) {
+                $oldTargetId = isset($item['target_id']) ? (int) $item['target_id'] : 0;
+                if ($oldTargetId && isset($mapping[$oldTargetId])) {
+                  $mappedValues[] = ['target_id' => $mapping[$oldTargetId]];
+                }
+              }
+              $fieldValues = $mappedValues;
+            }
+
+            $translation->set($fieldName, $fieldValues);
+          }
+        }
+
+        $element->save();
+        $result['updated_count']++;
+      }
+      catch (\Exception $e) {
+        $result['errors'][] = "Error overlaying element {$existingId} (from exported {$exportedId}): " . $e->getMessage();
+        $logger->error("Overlay failed for element {$existingId}: " . $e->getMessage());
+      }
+    }
+
+    // Update the node's translation to point to the default container
+    // (fixing the separate-container-per-language error).
+    if ($targetNode->hasTranslation($targetLangcode)) {
+      $nodeTranslation = $targetNode->getTranslation($targetLangcode);
+      if ($nodeTranslation->hasField($targetField)) {
+        $nodeTranslation->set($targetField, $existingRootId);
+        $targetNode->save();
+        $logger->notice("Updated node {$targetNid} ({$targetLangcode}) field {$targetField} to point to default container {$existingRootId}.");
+      }
+    }
+    else {
+      $logger->warning("Node {$targetNid} has no '{$targetLangcode}' translation; node field not updated.");
+    }
+
+    $result['root_id'] = $existingRootId;
+    $result['success'] = TRUE;
+    $logger->notice("Overlay complete. Updated: {$result['updated_count']} translations, Errors: " . count($result['errors']));
+
+    return $result;
+  }
+
+  /**
+   * Get the existing root element ID from a node's pagedesigner field.
+   *
+   * Uses the node's default language to find the "real" container.
+   *
+   * @param \Drupal\node\NodeInterface $node
+   *   The target node.
+   * @param string $fieldName
+   *   The pagedesigner field name.
+   *
+   * @return int
+   *   The root element ID.
+   *
+   * @throws \Exception
+   *   If the field is empty.
+   */
+  protected function getExistingRootId(NodeInterface $node, string $fieldName): int {
+    $defaultLangcode = $node->language()->getId();
+    $baseNode = $node->hasTranslation($defaultLangcode) ? $node->getTranslation($defaultLangcode) : $node;
+
+    $rootId = $baseNode->get($fieldName)->target_id ?? NULL;
+    if (!$rootId) {
+      throw new \Exception("Target node {$node->id()} has no element in field '{$fieldName}' (default language: {$defaultLangcode}).");
+    }
+
+    return (int) $rootId;
+  }
+
+  /**
+   * Detect the language used in the export data.
+   *
+   * For single-language exports, returns the only_langcode metadata or the
+   * single language present. For multi-language exports, returns the
+   * default_langcode.
+   *
+   * @param array $data
+   *   The export data array.
+   *
+   * @return string
+   *   The detected language code.
+   *
+   * @throws \Exception
+   *   If no language can be determined.
+   */
+  protected function detectExportLangcode(array $data): string {
+    // Single-language export metadata.
+    if (!empty($data['only_langcode'])) {
+      return $data['only_langcode'];
+    }
+
+    // Inspect the root element to find available languages.
+    $rootId = (string) $data['root_id'];
+    $rootData = $data['elements'][$rootId] ?? [];
+    $languages = array_keys($rootData);
+
+    if (count($languages) === 1) {
+      return $languages[0];
+    }
+
+    // Fall back to default_langcode.
+    if (!empty($data['default_langcode'])) {
+      return $data['default_langcode'];
+    }
+
+    throw new \Exception("Cannot determine export language for overlay. Use --only-langcode during export or ensure default_langcode is set.");
+  }
+
+  /**
+   * Build a structural mapping between exported element IDs and existing IDs.
+   *
+   * Walks both trees in parallel (by children order), mapping exported
+   * elements to existing elements positionally. Also maps style references.
+   *
+   * @param array $data
+   *   The full export data with elements.
+   * @param int $exportedId
+   *   The current exported element ID being mapped.
+   * @param string $exportLangcode
+   *   The language code to read children from in the export.
+   * @param \Drupal\pagedesigner\Entity\Element $existingElement
+   *   The corresponding existing element on the target site.
+   * @param string $existingLangcode
+   *   The language code to read children from on the existing element.
+   * @param array $mapping
+   *   Reference to the mapping array being built; [exported_id => existing_id].
+   * @param object $logger
+   *   Logger channel.
+   */
+  protected function buildTreeMapping(array $data, int $exportedId, string $exportLangcode, Element $existingElement, string $existingLangcode, array &$mapping, $logger): void {
+    $mapping[$exportedId] = (int) $existingElement->id();
+
+    $exportedData = $data['elements'][$exportedId][$exportLangcode] ?? [];
+
+    // Get existing element in its default/specified language.
+    if ($existingElement->hasTranslation($existingLangcode)) {
+      $existingTranslation = $existingElement->getTranslation($existingLangcode);
+    }
+    else {
+      $existingTranslation = $existingElement;
+    }
+
+    // Map children by position.
+    $exportedChildren = $exportedData['children'] ?? [];
+    $existingChildren = [];
+    if ($existingTranslation->hasField('children')) {
+      foreach ($existingTranslation->get('children') as $childRef) {
+        if ($childRef->entity) {
+          $existingChildren[] = $childRef->entity;
+        }
+      }
+    }
+
+    $matchCount = min(count($exportedChildren), count($existingChildren));
+    if (count($exportedChildren) !== count($existingChildren)) {
+      $logger->warning("Overlay mapping: exported element {$exportedId} has " . count($exportedChildren) . " children but existing element " . $existingElement->id() . " has " . count($existingChildren) . ". Matching first {$matchCount}.");
+    }
+
+    for ($i = 0; $i < $matchCount; $i++) {
+      $exportedChildId = (int) ($exportedChildren[$i]['target_id'] ?? 0);
+      if (!$exportedChildId || !isset($data['elements'][$exportedChildId])) {
+        continue;
+      }
+      $this->buildTreeMapping($data, $exportedChildId, $exportLangcode, $existingChildren[$i], $existingLangcode, $mapping, $logger);
+    }
+
+    // Map style references by position.
+    $exportedStyles = $exportedData['fields']['field_styles'] ?? [];
+    $existingStyles = [];
+    if ($existingTranslation->hasField('field_styles')) {
+      foreach ($existingTranslation->get('field_styles') as $styleRef) {
+        if ($styleRef->entity) {
+          $existingStyles[] = $styleRef->entity;
+        }
+      }
+    }
+
+    $styleMatchCount = min(count($exportedStyles), count($existingStyles));
+    if (count($exportedStyles) !== count($existingStyles) && (count($exportedStyles) > 0 || count($existingStyles) > 0)) {
+      $logger->warning("Overlay mapping: exported element {$exportedId} has " . count($exportedStyles) . " style refs but existing element " . $existingElement->id() . " has " . count($existingStyles) . ". Matching first {$styleMatchCount}.");
+    }
+
+    for ($i = 0; $i < $styleMatchCount; $i++) {
+      $exportedStyleId = (int) ($exportedStyles[$i]['target_id'] ?? 0);
+      if (!$exportedStyleId || !isset($data['elements'][$exportedStyleId])) {
+        continue;
+      }
+      $this->buildTreeMapping($data, $exportedStyleId, $exportLangcode, $existingStyles[$i], $existingLangcode, $mapping, $logger);
+    }
   }
 
 }
