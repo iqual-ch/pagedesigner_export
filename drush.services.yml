@@ -4,3 +4,9 @@ services:
     tags:
       - { name: drush.command }
     arguments: ['@pagedesigner_export.exporter', '@pagedesigner_export.importer']
+
+  pagedesigner_export.icms_source_commands:
+    class: Drupal\pagedesigner_export\Commands\IcmsSourceCommands
+    tags:
+      - { name: drush.command }
+    arguments: ['@pagedesigner_export.source_exporter']

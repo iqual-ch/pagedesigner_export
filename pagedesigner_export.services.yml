@@ -16,3 +16,14 @@ services:
 
   pagedesigner_export.id_mapper:
     class: Drupal\pagedesigner_export\Service\IdMapper
+
+  pagedesigner_export.source_exporter:
+    class: Drupal\pagedesigner_export\Service\SourceExporter
+    arguments:
+      - '@entity_type.manager'
+      - '@entity_field.manager'
+      - '@language_manager'
+      - '@path_alias.manager'
+      - '@config.factory'
+      - '@file_system'
+      - '@pagedesigner_export.exporter'

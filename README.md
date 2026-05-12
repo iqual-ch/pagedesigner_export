@@ -82,6 +82,44 @@ drush pd:import /tmp/page-tree.json \
 
 ## Drush Commands
 
+### `drush icms-source:export [options]`
+
+Export a migration-ready source package for ICMS mapping. This is the preferred
+site-level command for the migration workbench.
+
+```bash
+ddev drush icms-source:export \
+  --output=/var/www/html/.ddev/icms-source-export/five-informatik \
+  --bundles=page \
+  --limit=5
+```
+
+Generated files:
+
+```text
+manifest.json
+source-inventory.json
+pagedesigner/root-<element-id>.json
+```
+
+Options:
+
+- `--output=DIR` — Output directory. Required.
+- `--bundles=page,article` — Optional source node bundle filter.
+- `--fields=field_pagedesigner_content` — Optional PageDesigner field filter.
+- `--limit=5` — Optional node limit per bundle.
+- `--langcode=de` — Default langcode for tree exports.
+- `--sanitize-local-urls=1` — Convert local absolute URLs to relative paths.
+
+### `drush icms-source:inventory [options]`
+
+Print a JSON inventory of nodes, translations, aliases, PageDesigner fields, and
+root element IDs without exporting the trees.
+
+```bash
+ddev drush icms-source:inventory --bundles=page --limit=5
+```
+
 ### `drush pd:export <element-id> [options]`
 
 Export a Pagedesigner element tree and all translations to JSON.
