@@ -33,6 +33,7 @@ class SourceExporter {
    *
    * @param array $options
    *   Supported options:
+   *   - nids: int[]|null
    *   - bundles: string[]|null
    *   - fields: string[]|null
    *   - limit: int|null
@@ -43,6 +44,7 @@ class SourceExporter {
   public function inventory(array $options = []): array {
     $bundleFilter = $this->normalizeList($options['bundles'] ?? NULL);
     $fieldFilter = $this->normalizeList($options['fields'] ?? NULL);
+    $nidFilter = $this->normalizeIntList($options['nids'] ?? NULL);
     $limit = isset($options['limit']) && $options['limit'] !== NULL ? (int) $options['limit'] : NULL;
 
     $pagedesignerFieldsByBundle = $this->getPagedesignerFieldsByBundle($bundleFilter, $fieldFilter);
@@ -65,6 +67,10 @@ class SourceExporter {
         ->accessCheck(FALSE)
         ->condition('type', $bundle)
         ->sort('nid');
+
+      if ($nidFilter) {
+        $query->condition('nid', $nidFilter, 'IN');
+      }
 
       if ($limit) {
         $query->range(0, $limit);
@@ -157,6 +163,7 @@ class SourceExporter {
       'filters' => [
         'bundles' => $bundleFilter ? array_values($bundleFilter) : NULL,
         'fields' => $fieldFilter ? array_values($fieldFilter) : NULL,
+        'nids' => $nidFilter ? array_values($nidFilter) : NULL,
         'limit' => $limit,
       ],
       'pagedesignerFieldsByBundle' => $pagedesignerFieldsByBundle,
@@ -290,6 +297,18 @@ class SourceExporter {
     }
     $items = array_values(array_filter(array_map('trim', $value)));
     return $items ?: NULL;
+  }
+
+  /**
+   * Normalize a string/list option into an integer list.
+   */
+  protected function normalizeIntList(mixed $value): ?array {
+    $items = $this->normalizeList($value);
+    if (!$items) {
+      return NULL;
+    }
+    $ints = array_values(array_filter(array_map('intval', $items)));
+    return $ints ?: NULL;
   }
 
   /**

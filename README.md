@@ -106,6 +106,7 @@ Options:
 
 - `--output=DIR` — Output directory. Required.
 - `--bundles=page,article` — Optional source node bundle filter.
+- `--nids=33,55,56` — Optional exact source node ID filter.
 - `--fields=field_pagedesigner_content` — Optional PageDesigner field filter.
 - `--limit=5` — Optional node limit per bundle.
 - `--langcode=de` — Default langcode for tree exports.
@@ -118,6 +119,7 @@ root element IDs without exporting the trees.
 
 ```bash
 ddev drush icms-source:inventory --bundles=page --limit=5
+ddev drush icms-source:inventory --nids=33,55,56
 ```
 
 ### `drush pd:export <element-id> [options]`

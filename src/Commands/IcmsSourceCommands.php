@@ -24,6 +24,8 @@ class IcmsSourceCommands extends DrushCommands {
    * @aliases icms-source-inventory
    * @option bundles
    *   Comma-separated source node bundles to include.
+   * @option nids
+   *   Comma-separated source node IDs to include.
    * @option fields
    *   Comma-separated PageDesigner field names to include.
    * @option limit
@@ -32,6 +34,7 @@ class IcmsSourceCommands extends DrushCommands {
   public function inventory(
     array $options = [
       'bundles' => NULL,
+      'nids' => NULL,
       'fields' => NULL,
       'limit' => NULL,
     ],
@@ -49,6 +52,8 @@ class IcmsSourceCommands extends DrushCommands {
    *   Output directory. Supports stream-wrapper paths such as private://.
    * @option bundles
    *   Comma-separated source node bundles to include.
+   * @option nids
+   *   Comma-separated source node IDs to include.
    * @option fields
    *   Comma-separated PageDesigner field names to include.
    * @option limit
@@ -62,6 +67,7 @@ class IcmsSourceCommands extends DrushCommands {
     array $options = [
       'output' => NULL,
       'bundles' => NULL,
+      'nids' => NULL,
       'fields' => NULL,
       'limit' => NULL,
       'langcode' => NULL,
@@ -86,6 +92,7 @@ class IcmsSourceCommands extends DrushCommands {
   protected function normalizeOptions(array $options): array {
     return [
       'bundles' => $this->optionList($options['bundles'] ?? NULL),
+      'nids' => $this->optionList($options['nids'] ?? NULL),
       'fields' => $this->optionList($options['fields'] ?? NULL),
       'limit' => isset($options['limit']) && $options['limit'] !== NULL && $options['limit'] !== '' ? (int) $options['limit'] : NULL,
       'langcode' => $options['langcode'] ?? NULL,
