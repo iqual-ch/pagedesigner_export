@@ -205,6 +205,7 @@ class SourceExporter {
     $sanitizeLocalUrls = (bool) ($options['sanitize_local_urls'] ?? TRUE);
     $exports = [];
     $exportedRootIds = [];
+    $mediaIds = [];
 
     foreach ($inventory['nodes'] as $node) {
       foreach ($node['translations'] as $langcode => $translation) {
@@ -217,6 +218,9 @@ class SourceExporter {
           $path = $pagedesignerDir . DIRECTORY_SEPARATOR . $filename;
           $tree = $this->pagedesignerExporter->export($targetId, $defaultLangcode, $sanitizeLocalUrls);
           $this->writeJson($path, $tree);
+          foreach ($this->collectMediaIdsFromTree($tree) as $mediaId) {
+            $mediaIds[$mediaId] = TRUE;
+          }
           $exportedRootIds[$targetId] = TRUE;
           $exports[] = [
             'rootId' => $targetId,
@@ -234,15 +238,21 @@ class SourceExporter {
       }
     }
 
+    $mediaExport = $this->exportMediaAssets(array_keys($mediaIds), $realOutputDir);
+
     $manifest = [
       'format' => 'icms-source-export-v1',
       'generatedAt' => gmdate('c'),
       'site' => $inventory['site'],
       'files' => [
         'inventory' => 'source-inventory.json',
+        'mediaAssets' => $mediaExport['manifestFile'],
+        'mediaDir' => $mediaExport['mediaDir'],
         'pagedesignerDir' => 'pagedesigner',
       ],
       'stats' => [
+        'mediaAssetCount' => $mediaExport['assetCount'],
+        'mediaFileCount' => $mediaExport['fileCount'],
         'nodeCount' => $inventory['stats']['nodeCount'],
         'translationCount' => $inventory['stats']['translationCount'],
         'pagedesignerRootCount' => count($exports),
@@ -252,6 +262,148 @@ class SourceExporter {
     $this->writeJson($realOutputDir . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
 
     return $manifest;
+  }
+
+  /**
+   * Collect media entity ids referenced from PageDesigner field_media values.
+   */
+  protected function collectMediaIdsFromTree(array $tree): array {
+    $ids = [];
+    foreach (($tree['elements'] ?? []) as $translations) {
+      foreach ($translations as $payload) {
+        foreach (($payload['fields']['field_media'] ?? []) as $item) {
+          if (!empty($item['target_id'])) {
+            $ids[(int) $item['target_id']] = TRUE;
+          }
+        }
+      }
+    }
+    return array_keys($ids);
+  }
+
+  /**
+   * Export media metadata and copy local media files into the package.
+   */
+  protected function exportMediaAssets(array $mediaIds, string $realOutputDir): array {
+    sort($mediaIds, SORT_NUMERIC);
+
+    $mediaDir = 'media';
+    $filesDir = $mediaDir . '/files';
+    $realMediaDir = $realOutputDir . DIRECTORY_SEPARATOR . $mediaDir;
+    $realFilesDir = $realOutputDir . DIRECTORY_SEPARATOR . $filesDir;
+    $this->fileSystem->prepareDirectory(
+      $realFilesDir,
+      FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS,
+    );
+
+    $assets = [];
+    $fileCount = 0;
+    if ($mediaIds) {
+      $mediaStorage = $this->entityTypeManager->getStorage('media');
+      $fileStorage = $this->entityTypeManager->getStorage('file');
+      $mediaEntities = $mediaStorage->loadMultiple($mediaIds);
+
+      foreach ($mediaIds as $mediaId) {
+        $media = $mediaEntities[$mediaId] ?? NULL;
+        if (!$media) {
+          $assets[] = [
+            'sourceMediaId' => (int) $mediaId,
+            'status' => 'missing',
+            'files' => [],
+          ];
+          continue;
+        }
+
+        $assetFiles = [];
+        foreach ($media->getFieldDefinitions() as $fieldName => $definition) {
+          if (!$media->hasField($fieldName) || $media->get($fieldName)->isEmpty()) {
+            continue;
+          }
+          $fieldType = $definition->getType();
+          $settings = $definition->getSettings();
+          if (!in_array($fieldType, ['file', 'image'], TRUE) && ($settings['target_type'] ?? NULL) !== 'file') {
+            continue;
+          }
+          foreach ($media->get($fieldName)->getValue() as $item) {
+            if (empty($item['target_id'])) {
+              continue;
+            }
+            $file = $fileStorage->load((int) $item['target_id']);
+            if (!$file) {
+              continue;
+            }
+            $fileData = $this->copyMediaFile($media->id(), $fieldName, $file, $realFilesDir);
+            $fileData['alt'] = $item['alt'] ?? NULL;
+            $fileData['title'] = $item['title'] ?? NULL;
+            $assetFiles[] = $fileData;
+            $fileCount++;
+          }
+        }
+
+        $assets[] = [
+          'sourceMediaId' => (int) $media->id(),
+          'uuid' => $media->uuid(),
+          'bundle' => $media->bundle(),
+          'label' => $media->label(),
+          'langcode' => $media->language()->getId(),
+          'status' => 'exported',
+          'files' => $assetFiles,
+        ];
+      }
+    }
+
+    $manifest = [
+      'format' => 'icms-source-media-assets-v1',
+      'generatedAt' => gmdate('c'),
+      'filesBaseDir' => $filesDir,
+      'stats' => [
+        'assetCount' => count($assets),
+        'fileCount' => $fileCount,
+      ],
+      'assets' => $assets,
+    ];
+    $manifestFile = $mediaDir . '/media-assets.json';
+    $this->writeJson($realOutputDir . DIRECTORY_SEPARATOR . $manifestFile, $manifest);
+
+    return [
+      'assetCount' => count($assets),
+      'fileCount' => $fileCount,
+      'manifestFile' => $manifestFile,
+      'mediaDir' => $mediaDir,
+    ];
+  }
+
+  /**
+   * Copy one file entity into the media export folder.
+   */
+  protected function copyMediaFile(int|string $mediaId, string $fieldName, object $file, string $realFilesDir): array {
+    $uri = $file->getFileUri();
+    $sourcePath = $this->fileSystem->realpath($uri);
+    $filename = $file->getFilename();
+    $relativeDir = 'media/files/source-media-' . $mediaId;
+    $destinationDir = $realFilesDir . DIRECTORY_SEPARATOR . 'source-media-' . $mediaId;
+    $this->fileSystem->prepareDirectory(
+      $destinationDir,
+      FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS,
+    );
+    $destinationPath = $destinationDir . DIRECTORY_SEPARATOR . $filename;
+    $copyStatus = 'missing-source-file';
+    if ($sourcePath && is_file($sourcePath) && copy($sourcePath, $destinationPath)) {
+      $copyStatus = 'copied';
+    }
+
+    return [
+      'fieldName' => $fieldName,
+      'sourceFileId' => (int) $file->id(),
+      'uuid' => $file->uuid(),
+      'filename' => $filename,
+      'uri' => $uri,
+      'url' => method_exists($file, 'createFileUrl') ? $file->createFileUrl(FALSE) : NULL,
+      'mimeType' => $file->getMimeType(),
+      'size' => (int) $file->getSize(),
+      'relativePath' => $relativeDir . '/' . $filename,
+      'copyStatus' => $copyStatus,
+    ];
   }
 
   /**
