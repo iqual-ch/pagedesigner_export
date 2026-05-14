@@ -391,6 +391,52 @@ class SourceExporter {
     if ($sourcePath && is_file($sourcePath) && copy($sourcePath, $destinationPath)) {
       $copyStatus = 'copied';
     }
+    // Fallback: file is registered in DB but not present locally (typical of
+    // dev environments using stage_file_proxy). Try to fetch it over HTTP from
+    // its public URL so the export remains self-contained.
+    if ($copyStatus !== 'copied') {
+      $remoteUrl = method_exists($file, 'createFileUrl') ? $file->createFileUrl(FALSE) : NULL;
+      if ($remoteUrl) {
+        // Resolve to an absolute URL.
+        if (str_starts_with($remoteUrl, '/')) {
+          // CLI (drush) requests default to "https://default" which is useless.
+          // Prefer stage_file_proxy.origin when configured, then HTTP_HOST.
+          $origin = NULL;
+          $config = \Drupal::config('stage_file_proxy.settings');
+          if ($config) {
+            $origin = $config->get('origin');
+          }
+          if (!$origin) {
+            $iqConfig = \Drupal::config('iq_stage_file_proxy.settings');
+            if ($iqConfig) {
+              $origin = $iqConfig->get('remote_instance');
+            }
+          }
+          if (!$origin) {
+            $host = \Drupal::request()->getSchemeAndHttpHost();
+            if ($host && !str_contains($host, 'default')) {
+              $origin = $host;
+            }
+          }
+          if ($origin) {
+            $remoteUrl = rtrim($origin, '/') . $remoteUrl;
+          }
+          else {
+            $remoteUrl = NULL;
+          }
+        }
+        if ($remoteUrl) {
+          $context = stream_context_create([
+            'http' => ['timeout' => 30, 'follow_location' => 1, 'ignore_errors' => TRUE],
+            'https' => ['timeout' => 30, 'follow_location' => 1, 'ignore_errors' => TRUE],
+          ]);
+          $bytes = @file_get_contents($remoteUrl, FALSE, $context);
+          if ($bytes !== FALSE && strlen($bytes) > 0 && @file_put_contents($destinationPath, $bytes) !== FALSE) {
+            $copyStatus = 'downloaded';
+          }
+        }
+      }
+    }
 
     return [
       'fieldName' => $fieldName,
