@@ -5,6 +5,10 @@ services:
       - '@entity_type.manager'
       - '@logger.factory'
       - '@language_manager'
+      - '@entity_field.manager'
+      - '@entity_type.bundle.info'
+      - '@config.factory'
+      - '@path_alias.manager'
 
   pagedesigner_export.importer:
     class: Drupal\pagedesigner_export\Service\Importer

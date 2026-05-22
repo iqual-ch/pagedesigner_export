@@ -1,0 +1,79 @@
+{
+  "root_id": "1",
+  "default_langcode": "en",
+  "exported_at": 1779451200,
+  "elements": {
+    "1": {
+      "en": {
+        "type": "container",
+        "name": "Root Container",
+        "status": true,
+        "langcode": "en",
+        "container": [],
+        "parent": [],
+        "children": [
+          { "target_id": "2" },
+          { "target_id": "3" }
+        ],
+        "fields": {}
+      },
+      "fr": {
+        "type": "container",
+        "name": "Conteneur racine",
+        "status": true,
+        "langcode": "fr",
+        "container": [],
+        "parent": [],
+        "children": [
+          { "target_id": "2" },
+          { "target_id": "3" }
+        ],
+        "fields": {}
+      }
+    },
+    "2": {
+      "en": {
+        "type": "text",
+        "name": "Intro Text",
+        "status": true,
+        "langcode": "en",
+        "container": [{ "target_id": "1" }],
+        "parent": [{ "target_id": "1" }],
+        "children": [],
+        "fields": {
+          "field_title": [{ "value": "Welcome" }],
+          "field_text": [{ "value": "<p>Hello world.</p>", "format": "basic_html" }],
+          "field_link": [{ "uri": "internal:/contact", "title": "Contact" }]
+        }
+      },
+      "fr": {
+        "type": "text",
+        "name": "Texte intro",
+        "status": true,
+        "langcode": "fr",
+        "container": [{ "target_id": "1" }],
+        "parent": [{ "target_id": "1" }],
+        "children": [],
+        "fields": {
+          "field_title": [{ "value": "Bienvenue" }],
+          "field_text": [{ "value": "<p>Bonjour.</p>", "format": "basic_html" }],
+          "field_link": [{ "uri": "internal:/contact", "title": "Contact" }]
+        }
+      }
+    },
+    "3": {
+      "en": {
+        "type": "media",
+        "name": "Hero Image",
+        "status": true,
+        "langcode": "en",
+        "container": [{ "target_id": "1" }],
+        "parent": [{ "target_id": "1" }],
+        "children": [],
+        "fields": {
+          "field_media": [{ "target_id": "42" }]
+        }
+      }
+    }
+  }
+}

@@ -5,4 +5,5 @@ type: module
 core_version_requirement: ^10.3 || ^11
 dependencies:
   - drupal:node
+  - drupal:path_alias
   - pagedesigner

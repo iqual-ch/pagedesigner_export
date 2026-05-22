@@ -224,4 +224,203 @@ class PagedesignerExportCommands extends DrushCommands {
     return (bool) $value;
   }
 
+  /**
+   * Build a source migration manifest without exporting page trees.
+   *
+   * @param string $outputFile
+   *   Manifest JSON output path.
+   * @param array $options
+   *   Command options.
+   *
+   * @command pd:migration-manifest
+   * @aliases pd-migration-manifest
+   * @option entity-type
+   *   Source content entity type, default: node.
+   * @option bundle
+   *   Optional bundle filter.
+   * @option field
+   *   Optional pagedesigner field filter.
+   * @option limit
+   *   Optional page/root limit for smoke tests.
+   * @option include-unpublished
+   *   Include unpublished source translations/entities. Default: FALSE.
+   * @usage drush pd:migration-manifest /tmp/export-package/manifest.json --bundle=page
+   *   Build a manifest for node pages.
+   */
+  public function migrationManifest(
+    string $outputFile,
+    array $options = [
+      'entity-type' => 'node',
+      'bundle' => NULL,
+      'field' => NULL,
+      'limit' => NULL,
+      'include-unpublished' => FALSE,
+    ],
+  ): void {
+    try {
+      $manifest = $this->exporter->buildMigrationManifest($this->normalizeMigrationOptions($options));
+      $json = json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+      if ($json === FALSE) {
+        throw new \Exception('JSON encoding failed: ' . json_last_error_msg());
+      }
+
+      $directory = dirname($outputFile);
+      if (!is_dir($directory) && !mkdir($directory, 0775, TRUE) && !is_dir($directory)) {
+        throw new \Exception("Failed to create directory: {$directory}");
+      }
+
+      if (file_put_contents($outputFile, $json . "\n") === FALSE) {
+        throw new \Exception("Failed to write file: {$outputFile}");
+      }
+
+      $this->logger()->success('Wrote migration manifest to @file with @count page(s).', [
+        '@file' => $outputFile,
+        '@count' => count($manifest['pages']),
+      ]);
+    }
+    catch (\Exception $e) {
+      $this->logger()->error('Migration manifest export failed: @error', ['@error' => $e->getMessage()]);
+      throw $e;
+    }
+  }
+
+  /**
+   * Export a source migration package with manifest.json and pages/*.json.
+   *
+   * @param string $outputDirectory
+   *   Output package directory.
+   * @param array $options
+   *   Command options.
+   *
+   * @command pd:migration-export
+   * @aliases pd-migration-export
+   * @option entity-type
+   *   Source content entity type, default: node.
+   * @option bundle
+   *   Optional bundle filter.
+   * @option field
+   *   Optional pagedesigner field filter.
+   * @option limit
+   *   Optional page/root limit for smoke tests.
+   * @option include-unpublished
+   *   Include unpublished source translations/entities. Default: FALSE.
+   * @option force
+   *   Overwrite an existing non-empty output directory.
+   * @option sanitize-local-urls
+   *   Convert absolute local URLs in exported field payloads to relative paths. Default: TRUE.
+   * @usage drush pd:migration-export /tmp/export-package --bundle=page --force
+   *   Export a complete migration source package.
+   */
+  public function migrationExport(
+    string $outputDirectory,
+    array $options = [
+      'entity-type' => 'node',
+      'bundle' => NULL,
+      'field' => NULL,
+      'limit' => NULL,
+      'include-unpublished' => FALSE,
+      'force' => FALSE,
+      'sanitize-local-urls' => TRUE,
+    ],
+  ): void {
+    try {
+      $this->prepareOutputDirectory($outputDirectory, $this->optionToBool($options['force'] ?? FALSE));
+      $result = $this->exporter->exportMigrationPackage($outputDirectory, $this->normalizeMigrationOptions($options));
+
+      $this->logger()->success('Exported migration package to @dir with @count page tree(s).', [
+        '@dir' => $outputDirectory,
+        '@count' => $result['page_count'],
+      ]);
+      $this->output()->writeln($outputDirectory . '/manifest.json');
+    }
+    catch (\Exception $e) {
+      $this->logger()->error('Migration package export failed: @error', ['@error' => $e->getMessage()]);
+      throw $e;
+    }
+  }
+
+  /**
+   * Normalize migration command options for the exporter service.
+   *
+   * @param array $options
+   *   Raw Drush options.
+   *
+   * @return array
+   *   Service options.
+   */
+  protected function normalizeMigrationOptions(array $options): array {
+    return [
+      'entity_type' => $options['entity-type'] ?? 'node',
+      'bundle' => $options['bundle'] ?? NULL,
+      'field' => $options['field'] ?? NULL,
+      'limit' => $options['limit'] ?? NULL,
+      'include_unpublished' => $this->optionToBool($options['include-unpublished'] ?? FALSE),
+      'sanitize_local_urls' => $this->optionToBool($options['sanitize-local-urls'] ?? TRUE),
+    ];
+  }
+
+  /**
+   * Prepare the package output directory.
+   *
+   * @param string $outputDirectory
+   *   Output directory.
+   * @param bool $force
+   *   Whether to clear an existing non-empty directory.
+   *
+   * @throws \Exception
+   *   If the directory cannot be prepared safely.
+   */
+  protected function prepareOutputDirectory(string $outputDirectory, bool $force): void {
+    if (file_exists($outputDirectory) && !is_dir($outputDirectory)) {
+      throw new \Exception("Output path exists and is not a directory: {$outputDirectory}");
+    }
+
+    if (is_dir($outputDirectory)) {
+      $items = array_values(array_diff(scandir($outputDirectory) ?: [], ['.', '..']));
+      if ($items && !$force) {
+        throw new \Exception("Output directory is not empty. Use --force to overwrite: {$outputDirectory}");
+      }
+      if ($items) {
+        $this->clearDirectory($outputDirectory);
+      }
+    }
+
+    if (!is_dir($outputDirectory) && !mkdir($outputDirectory, 0775, TRUE) && !is_dir($outputDirectory)) {
+      throw new \Exception("Failed to create output directory: {$outputDirectory}");
+    }
+  }
+
+  /**
+   * Recursively clear a directory without removing the directory itself.
+   *
+   * @param string $directory
+   *   Directory to clear.
+   *
+   * @throws \Exception
+   *   If deletion would be unsafe or fails.
+   */
+  protected function clearDirectory(string $directory): void {
+    $realPath = realpath($directory);
+    if ($realPath === FALSE || $realPath === DIRECTORY_SEPARATOR || strlen($realPath) < 5) {
+      throw new \Exception("Refusing to clear unsafe output directory: {$directory}");
+    }
+
+    $iterator = new \RecursiveIteratorIterator(
+      new \RecursiveDirectoryIterator($realPath, \FilesystemIterator::SKIP_DOTS),
+      \RecursiveIteratorIterator::CHILD_FIRST,
+    );
+
+    foreach ($iterator as $item) {
+      $path = $item->getPathname();
+      if ($item->isDir()) {
+        if (!rmdir($path)) {
+          throw new \Exception("Failed to remove directory: {$path}");
+        }
+      }
+      elseif (!unlink($path)) {
+        throw new \Exception("Failed to remove file: {$path}");
+      }
+    }
+  }
+
 }

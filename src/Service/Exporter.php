@@ -2,9 +2,15 @@
 
 namespace Drupal\pagedesigner_export\Service;
 
+use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Core\Entity\EntityFieldManagerInterface;
+use Drupal\Core\Entity\EntityPublishedInterface;
+use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\path_alias\AliasManagerInterface;
 use Drupal\pagedesigner\Entity\Element;
 
 /**
@@ -26,7 +32,86 @@ class Exporter {
     protected EntityTypeManagerInterface $entityTypeManager,
     protected LoggerChannelFactoryInterface $loggerFactory,
     protected LanguageManagerInterface $languageManager,
+    protected EntityFieldManagerInterface $entityFieldManager,
+    protected EntityTypeBundleInfoInterface $entityTypeBundleInfo,
+    protected ConfigFactoryInterface $configFactory,
+    protected AliasManagerInterface $aliasManager,
   ) {}
+
+  /**
+   * Export contract schema version.
+   */
+  public const MIGRATION_SCHEMA_VERSION = '0.1.0';
+
+  /**
+   * Build a migration manifest for source entities with pagedesigner roots.
+   *
+   * @param array $options
+   *   Manifest options:
+   *   - entity_type: Entity type ID, defaults to node.
+   *   - bundle: Optional bundle filter.
+   *   - field: Optional pagedesigner field filter.
+   *   - limit: Optional page/root limit.
+   *   - include_unpublished: Include unpublished page translations.
+   *
+   * @return array
+   *   The manifest data.
+   */
+  public function buildMigrationManifest(array $options = []): array {
+    $siteConfig = $this->configFactory->get('system.site');
+    $entityTypeId = (string) ($options['entity_type'] ?? 'node');
+
+    return [
+      'schema_version' => self::MIGRATION_SCHEMA_VERSION,
+      'source' => [
+        'adapter' => 'pagedesigner_export',
+        'site_name' => $siteConfig->get('name') ?: NULL,
+        'site_uuid' => $siteConfig->get('uuid') ?: NULL,
+        'base_url' => $this->getBaseUrl(),
+        'default_langcode' => $this->languageManager->getDefaultLanguage()->getId(),
+        'drupal_version' => \Drupal::VERSION,
+        'exported_at' => time(),
+        'module_version' => self::MIGRATION_SCHEMA_VERSION,
+      ],
+      'pages' => $this->discoverMigrationPages($entityTypeId, $options),
+    ];
+  }
+
+  /**
+   * Export a complete migration package with manifest.json and pages/*.json.
+   *
+   * @param string $outputDirectory
+   *   Output package directory.
+   * @param array $options
+   *   Export options. See buildMigrationManifest().
+   *
+   * @return array
+   *   Export result with manifest data and page count.
+   *
+   * @throws \Exception
+   *   If any tree cannot be exported or written.
+   */
+  public function exportMigrationPackage(string $outputDirectory, array $options = []): array {
+    $manifest = $this->buildMigrationManifest($options);
+    $sanitizeLocalUrls = (bool) ($options['sanitize_local_urls'] ?? TRUE);
+
+    $pagesDirectory = rtrim($outputDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pages';
+    if (!is_dir($pagesDirectory) && !mkdir($pagesDirectory, 0775, TRUE) && !is_dir($pagesDirectory)) {
+      throw new \Exception("Failed to create pages directory: {$pagesDirectory}");
+    }
+
+    foreach ($manifest['pages'] as $page) {
+      $tree = $this->export((int) $page['pagedesigner_root_id'], $page['default_langcode'], $sanitizeLocalUrls);
+      $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . $page['export_file'], $tree);
+    }
+
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
+
+    return [
+      'manifest' => $manifest,
+      'page_count' => count($manifest['pages']),
+    ];
+  }
 
   /**
    * Export a pagedesigner element tree and all translations.
@@ -99,6 +184,389 @@ class Exporter {
 
     $logger->notice('Exported ' . count($data['elements']) . ' elements.');
     return $data;
+  }
+
+  /**
+   * Discover source pages/entities that contain pagedesigner root references.
+   *
+   * @param string $entityTypeId
+   *   Content entity type ID.
+   * @param array $options
+   *   Discovery options.
+   *
+   * @return array
+   *   Manifest page entries.
+   *
+   * @throws \Exception
+   *   If the entity type cannot be exported.
+   */
+  protected function discoverMigrationPages(string $entityTypeId, array $options): array {
+    $entityType = $this->entityTypeManager->getDefinition($entityTypeId, FALSE);
+    if (!$entityType) {
+      throw new \Exception("Unknown entity type: {$entityTypeId}");
+    }
+    if (!$entityType->entityClassImplements(ContentEntityInterface::class)) {
+      throw new \Exception("Entity type is not a content entity: {$entityTypeId}");
+    }
+
+    $storage = $this->entityTypeManager->getStorage($entityTypeId);
+    $bundleKey = $entityType->getKey('bundle');
+    $idKey = $entityType->getKey('id') ?: 'id';
+    $bundleFilter = $options['bundle'] ?? NULL;
+    $fieldFilter = $options['field'] ?? NULL;
+    $includeUnpublished = (bool) ($options['include_unpublished'] ?? FALSE);
+    $limit = isset($options['limit']) && $options['limit'] !== NULL && $options['limit'] !== '' ? (int) $options['limit'] : NULL;
+    $bundles = $this->getBundles($entityTypeId, $bundleFilter);
+    $pages = [];
+
+    foreach ($bundles as $bundle) {
+      $pagedesignerFields = $this->getPagedesignerFields($entityTypeId, $bundle, $fieldFilter);
+      if (!$pagedesignerFields) {
+        continue;
+      }
+
+      $query = $storage->getQuery()
+        ->accessCheck(FALSE)
+        ->sort($idKey, 'ASC');
+
+      if ($bundleKey && $bundle !== $entityTypeId) {
+        $query->condition($bundleKey, $bundle);
+      }
+
+      $fieldGroup = $query->orConditionGroup();
+      foreach ($pagedesignerFields as $fieldName) {
+        $fieldGroup->exists($fieldName);
+      }
+      $query->condition($fieldGroup);
+
+      $remaining = $limit !== NULL ? $limit - count($pages) : NULL;
+      if ($remaining !== NULL && $remaining <= 0) {
+        break;
+      }
+      if ($remaining !== NULL) {
+        $query->range(0, $remaining);
+      }
+
+      $entityIds = $query->execute();
+      if (!$entityIds) {
+        continue;
+      }
+
+      /** @var \Drupal\Core\Entity\ContentEntityInterface[] $entities */
+      $entities = $storage->loadMultiple($entityIds);
+      foreach ($entities as $entity) {
+        $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+        if (!$langcodes) {
+          continue;
+        }
+
+        $rootsByField = $this->getPagedesignerRootsByField($entity, $pagedesignerFields, $langcodes);
+        $rootCount = array_sum(array_map('count', $rootsByField));
+        foreach ($rootsByField as $fieldName => $rootIds) {
+          foreach ($rootIds as $rootId) {
+            $pages[] = $this->buildPageManifestEntry($entity, $fieldName, (string) $rootId, $langcodes, $rootCount > 1);
+            if ($limit !== NULL && count($pages) >= $limit) {
+              break 3;
+            }
+          }
+        }
+      }
+    }
+
+    return $pages;
+  }
+
+  /**
+   * Get bundle IDs for an entity type.
+   *
+   * @param string $entityTypeId
+   *   Entity type ID.
+   * @param string|null $bundleFilter
+   *   Optional bundle filter.
+   *
+   * @return string[]
+   *   Bundle IDs.
+   */
+  protected function getBundles(string $entityTypeId, ?string $bundleFilter): array {
+    if ($bundleFilter) {
+      return [$bundleFilter];
+    }
+
+    $bundleInfo = $this->entityTypeBundleInfo->getBundleInfo($entityTypeId);
+    return $bundleInfo ? array_keys($bundleInfo) : [$entityTypeId];
+  }
+
+  /**
+   * Get pagedesigner entity reference fields for a bundle.
+   *
+   * @param string $entityTypeId
+   *   Entity type ID.
+   * @param string $bundle
+   *   Bundle ID.
+   * @param string|null $fieldFilter
+   *   Optional field filter.
+   *
+   * @return string[]
+   *   Field names.
+   */
+  protected function getPagedesignerFields(string $entityTypeId, string $bundle, ?string $fieldFilter): array {
+    $fields = [];
+    $definitions = $this->entityFieldManager->getFieldDefinitions($entityTypeId, $bundle);
+    foreach ($definitions as $fieldName => $definition) {
+      if ($fieldFilter && $fieldName !== $fieldFilter) {
+        continue;
+      }
+      if (in_array($definition->getType(), ['entity_reference', 'entity_reference_revisions'], TRUE) && $definition->getSetting('target_type') === 'pagedesigner_element') {
+        $fields[] = $fieldName;
+      }
+    }
+
+    return $fields;
+  }
+
+  /**
+   * Get exportable language codes for an entity.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   * @param bool $includeUnpublished
+   *   Whether unpublished translations are included.
+   *
+   * @return string[]
+   *   Language codes.
+   */
+  protected function getExportableLangcodes(ContentEntityInterface $entity, bool $includeUnpublished): array {
+    $defaultLangcode = $entity->language()->getId();
+    $languages = [$defaultLangcode => $defaultLangcode];
+    if ($entity->isTranslatable()) {
+      foreach ($entity->getTranslationLanguages() as $langcode => $language) {
+        $languages[$langcode] = $langcode;
+      }
+    }
+
+    $exportable = [];
+    foreach ($languages as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      if (!$includeUnpublished && $translation instanceof EntityPublishedInterface && !$translation->isPublished()) {
+        continue;
+      }
+      $exportable[] = $langcode;
+    }
+
+    usort($exportable, static function (string $a, string $b) use ($defaultLangcode): int {
+      if ($a === $defaultLangcode) {
+        return -1;
+      }
+      if ($b === $defaultLangcode) {
+        return 1;
+      }
+      return $a <=> $b;
+    });
+
+    return array_values(array_unique($exportable));
+  }
+
+  /**
+   * Collect pagedesigner root IDs grouped by field for exportable translations.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   * @param string[] $fieldNames
+   *   Candidate pagedesigner fields.
+   * @param string[] $langcodes
+   *   Exportable language codes.
+   *
+   * @return array
+   *   Root IDs keyed by field name.
+   */
+  protected function getPagedesignerRootsByField(ContentEntityInterface $entity, array $fieldNames, array $langcodes): array {
+    $rootsByField = [];
+    foreach ($fieldNames as $fieldName) {
+      $rootIds = [];
+      foreach ($langcodes as $langcode) {
+        $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+        if (!$translation->hasField($fieldName) || $translation->get($fieldName)->isEmpty()) {
+          continue;
+        }
+        foreach ($translation->get($fieldName)->getValue() as $item) {
+          if (!empty($item['target_id'])) {
+            $rootIds[(string) $item['target_id']] = (string) $item['target_id'];
+          }
+        }
+      }
+      if ($rootIds) {
+        $rootsByField[$fieldName] = array_values($rootIds);
+      }
+    }
+
+    return $rootsByField;
+  }
+
+  /**
+   * Build a manifest page entry for one source entity/root pair.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   * @param string $fieldName
+   *   Pagedesigner field name.
+   * @param string $rootId
+   *   Pagedesigner root element ID.
+   * @param string[] $langcodes
+   *   Exported language codes.
+   * @param bool $forceUniqueId
+   *   Whether the page ID should include field/root details.
+   *
+   * @return array
+   *   Manifest page entry.
+   */
+  protected function buildPageManifestEntry(ContentEntityInterface $entity, string $fieldName, string $rootId, array $langcodes, bool $forceUniqueId): array {
+    $entityTypeId = $entity->getEntityTypeId();
+    $entityId = (string) $entity->id();
+    $defaultLangcode = $entity->language()->getId();
+    $titles = [];
+    $paths = [];
+    $statuses = [];
+
+    foreach ($langcodes as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      $titles[$langcode] = $translation->label();
+      $paths[$langcode] = $this->getEntityPath($translation, $langcode);
+      $statuses[$langcode] = $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE;
+    }
+
+    $pageId = "{$entityTypeId}:{$entityId}";
+    if ($forceUniqueId) {
+      $pageId .= ":{$fieldName}:root:{$rootId}";
+    }
+
+    $entry = [
+      'id' => $pageId,
+      'entity_type' => $entityTypeId,
+      'bundle' => $entity->bundle(),
+      'source_entity_id' => is_numeric($entityId) ? (int) $entityId : $entityId,
+      'entity_id' => is_numeric($entityId) ? (int) $entityId : $entityId,
+      'default_langcode' => $defaultLangcode,
+      'languages' => $langcodes,
+      'langcodes' => $langcodes,
+      'titles' => $titles,
+      'title' => $titles,
+      'paths' => $paths,
+      'path' => $paths,
+      'status' => $statuses[$defaultLangcode] ?? reset($statuses),
+      'statuses' => $statuses,
+      'pagedesigner_root_id' => $rootId,
+      'pagedesigner_field' => $fieldName,
+      'export_file' => 'pages/' . $this->buildPageExportFilename($entityTypeId, $entityId, $fieldName, $rootId, $forceUniqueId),
+    ];
+
+    if (method_exists($entity, 'uuid')) {
+      $entry['uuid'] = $entity->uuid();
+    }
+
+    return $entry;
+  }
+
+  /**
+   * Build a stable page tree export filename.
+   *
+   * @param string $entityTypeId
+   *   Entity type ID.
+   * @param string $entityId
+   *   Entity ID.
+   * @param string $fieldName
+   *   Pagedesigner field name.
+   * @param string $rootId
+   *   Root element ID.
+   * @param bool $includeField
+   *   Include the field name in the filename.
+   *
+   * @return string
+   *   Filename relative to pages/.
+   */
+  protected function buildPageExportFilename(string $entityTypeId, string $entityId, string $fieldName, string $rootId, bool $includeField): string {
+    $parts = [$entityTypeId, $entityId];
+    if ($includeField) {
+      $parts[] = $fieldName;
+    }
+    $parts[] = 'root';
+    $parts[] = $rootId;
+
+    return preg_replace('/[^A-Za-z0-9_.-]+/', '-', implode('-', $parts)) . '.json';
+  }
+
+  /**
+   * Get a source entity path/alias for a language.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity translation.
+   * @param string $langcode
+   *   Language code.
+   *
+   * @return string|null
+   *   Path or alias, if available.
+   */
+  protected function getEntityPath(ContentEntityInterface $entity, string $langcode): ?string {
+    if ($entity->getEntityTypeId() === 'node') {
+      return $this->aliasManager->getAliasByPath('/node/' . $entity->id(), $langcode);
+    }
+
+    try {
+      if ($entity->hasLinkTemplate('canonical')) {
+        return $entity->toUrl('canonical')->toString();
+      }
+    }
+    catch (\Exception) {
+      // Fall through to NULL for entities without usable canonical routes.
+    }
+
+    return NULL;
+  }
+
+  /**
+   * Get the current request base URL when available.
+   *
+   * @return string|null
+   *   Base URL or NULL.
+   */
+  protected function getBaseUrl(): ?string {
+    try {
+      $request = \Drupal::request();
+      if ($request && $request->getHost()) {
+        return $request->getSchemeAndHttpHost();
+      }
+    }
+    catch (\Exception) {
+      // CLI contexts may not have a meaningful request.
+    }
+
+    return NULL;
+  }
+
+  /**
+   * Write a JSON file using the package JSON encoding contract.
+   *
+   * @param string $filePath
+   *   Destination file path.
+   * @param array $data
+   *   Data to encode.
+   *
+   * @throws \Exception
+   *   If encoding or writing fails.
+   */
+  protected function writeJsonFile(string $filePath, array $data): void {
+    $directory = dirname($filePath);
+    if (!is_dir($directory) && !mkdir($directory, 0775, TRUE) && !is_dir($directory)) {
+      throw new \Exception("Failed to create directory: {$directory}");
+    }
+
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === FALSE) {
+      throw new \Exception('JSON encoding failed: ' . json_last_error_msg());
+    }
+
+    if (file_put_contents($filePath, $json . "\n") === FALSE) {
+      throw new \Exception("Failed to write file: {$filePath}");
+    }
   }
 
   /**

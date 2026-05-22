@@ -1,0 +1,151 @@
+{
+  "schema_version": "0.1.0",
+  "artifact": "source_export_drupal_module_contract",
+  "module": {
+    "suggested_machine_name": "pagedesigner_export",
+    "suggested_package_name": "iqual/pagedesigner_export",
+    "runs_in": "legacy_drupal_source_site",
+    "purpose": "Export pagedesigner-backed Drupal content into target-independent JSON packages consumed by the standalone migration runner."
+  },
+  "boundaries": {
+    "owns": [
+      "Discovering source Drupal entities that contain pagedesigner roots",
+      "Reading pagedesigner element trees from the source site",
+      "Exporting one JSON tree per page/root",
+      "Exporting a package manifest with source page metadata",
+      "Exporting enough media/link/translation metadata for offline analysis",
+      "Writing files to an export directory"
+    ],
+    "does_not_own": [
+      "ICMS target bundle decisions",
+      "Paragraph/blokkli target mapping",
+      "Canonical normalization",
+      "Mapping analysis",
+      "Migration preflight",
+      "Migration plan generation",
+      "Target Drupal entity creation"
+    ]
+  },
+  "required_commands": {
+    "pd:migration-export": {
+      "description": "Export a full source package for migration analysis.",
+      "arguments": {
+        "output_directory": "Directory where manifest.json and page tree files are written."
+      },
+      "options": {
+        "entity-type": "Optional Drupal entity type filter, default node.",
+        "bundle": "Optional bundle filter.",
+        "limit": "Optional item limit for smoke tests.",
+        "include-unpublished": "Whether unpublished translations/entities are exported.",
+        "force": "Overwrite existing output directory."
+      },
+      "expected_exit_codes": {
+        "0": "Export completed without validation errors.",
+        "1": "Command/runtime failure.",
+        "2": "Export completed but source validation warnings/errors require review."
+      }
+    },
+    "pd:migration-manifest": {
+      "description": "Build or inspect the package manifest without necessarily exporting every page tree.",
+      "arguments": {
+        "output_file": "Manifest JSON path."
+      }
+    }
+  },
+  "export_package": {
+    "required_files": [
+      "manifest.json",
+      "pages/*.json"
+    ],
+    "optional_files": [
+      "media.json",
+      "links.json",
+      "references.json",
+      "files/**"
+    ],
+    "manifest_required_keys": [
+      "schema_version",
+      "source",
+      "pages"
+    ],
+    "page_entry_required_keys": [
+      "id",
+      "entity_type",
+      "bundle",
+      "source_entity_id",
+      "default_langcode",
+      "languages",
+      "titles",
+      "paths",
+      "status",
+      "pagedesigner_root_id",
+      "pagedesigner_field",
+      "export_file"
+    ],
+    "tree_export_required_keys": [
+      "root_id",
+      "default_langcode",
+      "exported_at",
+      "elements"
+    ]
+  },
+  "minimum_mvp_data": {
+    "source": [
+      "Drupal version",
+      "site UUID if available",
+      "base URL if available",
+      "exported_at timestamp"
+    ],
+    "page_metadata": [
+      "entity type",
+      "bundle",
+      "entity ID",
+      "UUID if available",
+      "default language",
+      "available languages",
+      "title per language",
+      "path alias per language",
+      "published status per language",
+      "pagedesigner field name",
+      "pagedesigner root ID"
+    ],
+    "element_tree": [
+      "element ID",
+      "type/source type",
+      "language payloads",
+      "fields",
+      "parent references",
+      "container references",
+      "children references",
+      "media reference raw values",
+      "link field raw values"
+    ]
+  },
+  "quality_gates": {
+    "must_be_target_independent": true,
+    "must_not_require_icms": true,
+    "must_be_reproducible": true,
+    "must_keep_source_ids_stable": true,
+    "must_preserve_unknown_fields": true
+  },
+  "standalone_runner_consumes": {
+    "manifest": "tests/fixtures/export-package/manifest.json shape",
+    "single_tree": "tests/fixtures/pagedesigner-export-simple.json shape",
+    "commands_after_export": [
+      "source:manifest:inspect",
+      "source:manifest:normalize",
+      "canonical:inspect",
+      "mapping:analyze",
+      "migration:preflight",
+      "migration:plan",
+      "migration:handoff"
+    ]
+  },
+  "acceptance_tests_for_module_creation": [
+    "Module installs in a legacy Drupal project.",
+    "Drush command can export one known page to an output directory.",
+    "Output contains manifest.json and at least one pages/*.json file.",
+    "Standalone runner can run source:manifest:inspect on the exported manifest.",
+    "Standalone runner can run source:manifest:normalize and produce canonical JSON."
+  ]
+}
