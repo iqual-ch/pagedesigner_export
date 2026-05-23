@@ -319,7 +319,7 @@ class Exporter {
       if ($fieldFilter && $fieldName !== $fieldFilter) {
         continue;
       }
-      if (in_array($definition->getType(), ['entity_reference', 'entity_reference_revisions'], TRUE) && $definition->getSetting('target_type') === 'pagedesigner_element') {
+      if ($definition->getSetting('target_type') === 'pagedesigner_element' && in_array($definition->getType(), ['entity_reference', 'entity_reference_revisions', 'pagedesigner_item'], TRUE)) {
         $fields[] = $fieldName;
       }
     }
