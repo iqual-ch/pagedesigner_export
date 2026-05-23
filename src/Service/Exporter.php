@@ -8,6 +8,8 @@ use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityPublishedInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\path_alias\AliasManagerInterface;
@@ -36,6 +38,7 @@ class Exporter {
     protected EntityTypeBundleInfoInterface $entityTypeBundleInfo,
     protected ConfigFactoryInterface $configFactory,
     protected AliasManagerInterface $aliasManager,
+    protected FileUrlGeneratorInterface $fileUrlGenerator,
   ) {}
 
   /**
@@ -631,6 +634,7 @@ class Exporter {
       if ($element->hasField($fieldName)) {
         $values = $element->get($fieldName)->getValue();
         if (!empty($values)) {
+          $values = $this->enrichReferenceFieldValues($values, $definition, $element->language()->getId(), $sanitizeLocalUrls);
           if ($sanitizeLocalUrls) {
             $values = $this->sanitizeFieldValues($values);
           }
@@ -699,6 +703,159 @@ class Exporter {
     }
 
     return $ids;
+  }
+
+  /**
+   * Add referenced media/file metadata to exported field payload values.
+   *
+   * The standalone migration runner needs downloadable source URLs for the
+   * Drupal Migrate file/media stages. Pagedesigner fields often only store a
+   * media target_id, so enrich these raw field values while keeping the source
+   * item shape and target_id intact.
+   *
+   * @param array $values
+   *   Raw field item values.
+   * @param \Drupal\Core\Field\FieldDefinitionInterface $definition
+   *   Field definition.
+   * @param string $langcode
+   *   Current export language.
+   * @param bool $sanitizeLocalUrls
+   *   Whether local generated file URLs should be sanitized.
+   *
+   * @return array
+   *   Enriched field item values.
+   */
+  protected function enrichReferenceFieldValues(array $values, FieldDefinitionInterface $definition, string $langcode, bool $sanitizeLocalUrls): array {
+    $targetType = (string) $definition->getSetting('target_type');
+    if (!in_array($targetType, ['media', 'file'], TRUE)) {
+      return $values;
+    }
+
+    foreach ($values as $delta => $item) {
+      if (!is_array($item) || empty($item['target_id'])) {
+        continue;
+      }
+
+      $referencedEntity = $this->entityTypeManager->getStorage($targetType)->load($item['target_id']);
+      if (!$referencedEntity instanceof ContentEntityInterface) {
+        continue;
+      }
+      if ($referencedEntity->hasTranslation($langcode)) {
+        $referencedEntity = $referencedEntity->getTranslation($langcode);
+      }
+
+      $metadata = $targetType === 'file'
+        ? $this->buildFileReferenceMetadata($referencedEntity, NULL, $sanitizeLocalUrls)
+        : $this->buildMediaReferenceMetadata($referencedEntity, $sanitizeLocalUrls);
+
+      if (!$metadata) {
+        continue;
+      }
+
+      $values[$delta]['referenced_entity'] = $metadata;
+      if (!empty($metadata['files'][0]) && is_array($metadata['files'][0])) {
+        $firstFile = $metadata['files'][0];
+        $values[$delta]['file_target_id'] = $firstFile['target_id'] ?? NULL;
+        $values[$delta]['filename'] = $firstFile['filename'] ?? NULL;
+        $values[$delta]['uri'] = $firstFile['uri'] ?? NULL;
+        $values[$delta]['url'] = $firstFile['url'] ?? NULL;
+        $values[$delta]['sourceUrl'] = $firstFile['url'] ?? NULL;
+        $values[$delta]['mime_type'] = $firstFile['mime_type'] ?? NULL;
+      }
+      elseif ($targetType === 'file') {
+        $values[$delta]['filename'] = $metadata['filename'] ?? NULL;
+        $values[$delta]['uri'] = $metadata['uri'] ?? NULL;
+        $values[$delta]['url'] = $metadata['url'] ?? NULL;
+        $values[$delta]['sourceUrl'] = $metadata['url'] ?? NULL;
+        $values[$delta]['mime_type'] = $metadata['mime_type'] ?? NULL;
+      }
+    }
+
+    return $values;
+  }
+
+  /**
+   * Build metadata for a referenced media entity.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $media
+   *   Referenced media entity.
+   * @param bool $sanitizeLocalUrls
+   *   Whether local generated file URLs should be sanitized.
+   *
+   * @return array
+   *   Media metadata with nested file references.
+   */
+  protected function buildMediaReferenceMetadata(ContentEntityInterface $media, bool $sanitizeLocalUrls): array {
+    $files = [];
+    foreach ($media->getFieldDefinitions() as $fieldName => $definition) {
+      if (!$media->hasField($fieldName) || $media->get($fieldName)->isEmpty()) {
+        continue;
+      }
+
+      $fieldType = $definition->getType();
+      $targetType = (string) $definition->getSetting('target_type');
+      if (!in_array($fieldType, ['image', 'file'], TRUE) && $targetType !== 'file') {
+        continue;
+      }
+
+      foreach ($media->get($fieldName) as $item) {
+        if (empty($item->target_id) || empty($item->entity) || !$item->entity instanceof ContentEntityInterface) {
+          continue;
+        }
+
+        $fileMetadata = $this->buildFileReferenceMetadata($item->entity, $fieldName, $sanitizeLocalUrls);
+        if ($fileMetadata) {
+          $files[] = $fileMetadata + [
+            'field_name' => $fieldName,
+            'alt' => isset($item->alt) ? (string) $item->alt : '',
+            'title' => isset($item->title) ? (string) $item->title : '',
+          ];
+        }
+      }
+    }
+
+    return [
+      'entity_type' => $media->getEntityTypeId(),
+      'id' => is_numeric($media->id()) ? (int) $media->id() : $media->id(),
+      'uuid' => method_exists($media, 'uuid') ? $media->uuid() : NULL,
+      'bundle' => $media->bundle(),
+      'label' => $media->label(),
+      'langcode' => $media->language()->getId(),
+      'files' => $files,
+    ];
+  }
+
+  /**
+   * Build metadata for a referenced file entity.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $file
+   *   Referenced file entity.
+   * @param string|null $fieldName
+   *   Parent media/source field name, if available.
+   * @param bool $sanitizeLocalUrls
+   *   Whether local generated file URLs should be sanitized.
+   *
+   * @return array
+   *   File metadata.
+   */
+  protected function buildFileReferenceMetadata(ContentEntityInterface $file, ?string $fieldName, bool $sanitizeLocalUrls): array {
+    $uri = method_exists($file, 'getFileUri') ? $file->getFileUri() : ($file->hasField('uri') ? $file->get('uri')->value : NULL);
+    $url = $uri ? $this->fileUrlGenerator->generateAbsoluteString($uri) : NULL;
+    if ($url && $sanitizeLocalUrls) {
+      $url = $this->sanitizeLocalUrl($url);
+    }
+
+    return [
+      'entity_type' => $file->getEntityTypeId(),
+      'field_name' => $fieldName,
+      'target_id' => is_numeric($file->id()) ? (int) $file->id() : $file->id(),
+      'uuid' => method_exists($file, 'uuid') ? $file->uuid() : NULL,
+      'filename' => method_exists($file, 'getFilename') ? $file->getFilename() : $file->label(),
+      'uri' => $uri,
+      'url' => $url,
+      'mime_type' => method_exists($file, 'getMimeType') ? $file->getMimeType() : NULL,
+      'filesize' => method_exists($file, 'getSize') ? (int) $file->getSize() : NULL,
+    ];
   }
 
   /**

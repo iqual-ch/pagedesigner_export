@@ -117,7 +117,8 @@
       "parent references",
       "container references",
       "children references",
-      "media reference raw values",
+      "media reference raw values plus referenced media metadata",
+      "downloadable file URLs for media/file references where available",
       "link field raw values"
     ]
   },

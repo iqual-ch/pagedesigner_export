@@ -9,6 +9,7 @@ services:
       - '@entity_type.bundle.info'
       - '@config.factory'
       - '@path_alias.manager'
+        - '@file_url_generator'
 
   pagedesigner_export.importer:
     class: Drupal\pagedesigner_export\Service\Importer
