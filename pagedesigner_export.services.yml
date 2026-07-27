@@ -10,6 +10,8 @@ services:
       - '@config.factory'
       - '@path_alias.manager'
       - '@file_url_generator'
+      - '@module_handler'
+      - '@plugin.manager.menu.link'
 
   pagedesigner_export.importer:
     class: Drupal\pagedesigner_export\Service\Importer

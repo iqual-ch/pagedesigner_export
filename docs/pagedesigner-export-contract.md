@@ -23,9 +23,18 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Initial schema version: `0.1.0`.
+Current schema version: `0.2.0` (additive over `0.1.0`).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
+
+Schema `0.2.0` adds per page (all additive, omitted when empty):
+
+- `created` / `changed` — per-langcode unix timestamps
+- `authors` — per-langcode `{uid, name}`
+- `taxonomies` — `[{field, terms: [{tid, uuid, name, labels, vocabulary}]}]`
+- `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
+- `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
+- `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
 ## Existing Tree Export Compatibility
 

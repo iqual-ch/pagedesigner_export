@@ -7,13 +7,17 @@ use Drupal\Core\Entity\ContentEntityInterface;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityPublishedInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
+use Drupal\Core\Entity\EntityChangedInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\Core\Menu\MenuLinkManagerInterface;
 use Drupal\path_alias\AliasManagerInterface;
 use Drupal\pagedesigner\Entity\Element;
+use Drupal\user\EntityOwnerInterface;
 
 /**
  * Exports Pagedesigner element trees to JSON.
@@ -39,12 +43,14 @@ class Exporter {
     protected ConfigFactoryInterface $configFactory,
     protected AliasManagerInterface $aliasManager,
     protected FileUrlGeneratorInterface $fileUrlGenerator,
+    protected ?ModuleHandlerInterface $moduleHandler = NULL,
+    protected ?MenuLinkManagerInterface $menuLinkManager = NULL,
   ) {}
 
   /**
    * Export contract schema version.
    */
-  public const MIGRATION_SCHEMA_VERSION = '0.1.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.2.0';
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -103,10 +109,13 @@ class Exporter {
       throw new \Exception("Failed to create pages directory: {$pagesDirectory}");
     }
 
-    foreach ($manifest['pages'] as $page) {
+    foreach ($manifest['pages'] as &$page) {
       $tree = $this->export((int) $page['pagedesigner_root_id'], $page['default_langcode'], $sanitizeLocalUrls);
       $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . $page['export_file'], $tree);
+      // Stable per-page hash so re-exports can skip unchanged pages.
+      $page['content_hash'] = sha1(json_encode($tree, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '');
     }
+    unset($page);
 
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
 
@@ -466,7 +475,193 @@ class Exporter {
       $entry['uuid'] = $entity->uuid();
     }
 
+    $entry += $this->buildEntityMetadata($entity, $langcodes);
+
     return $entry;
+  }
+
+  /**
+   * Build schema 0.2.0 entity metadata for one manifest page entry.
+   *
+   * Everything here is additive and null-safe so 0.1.x consumers keep
+   * working: dates and authorship per translation, taxonomy assignments,
+   * menu placement, and redirects pointing at the entity.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   * @param string[] $langcodes
+   *   Exported language codes.
+   *
+   * @return array
+   *   Metadata keys to merge into the manifest entry.
+   */
+  protected function buildEntityMetadata(ContentEntityInterface $entity, array $langcodes): array {
+    $created = [];
+    $changed = [];
+    $authors = [];
+    foreach ($langcodes as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      if (method_exists($translation, 'getCreatedTime')) {
+        $created[$langcode] = (int) $translation->getCreatedTime();
+      }
+      if ($translation instanceof EntityChangedInterface) {
+        $changed[$langcode] = (int) $translation->getChangedTime();
+      }
+      if ($translation instanceof EntityOwnerInterface) {
+        $owner = $translation->getOwner();
+        $authors[$langcode] = [
+          'uid' => (int) $translation->getOwnerId(),
+          'name' => $owner ? $owner->getDisplayName() : NULL,
+        ];
+      }
+    }
+
+    $metadata = [];
+    if ($created) {
+      $metadata['created'] = $created;
+    }
+    if ($changed) {
+      $metadata['changed'] = $changed;
+    }
+    if ($authors) {
+      $metadata['authors'] = $authors;
+    }
+
+    $taxonomies = $this->buildTaxonomyAssignments($entity);
+    if ($taxonomies) {
+      $metadata['taxonomies'] = $taxonomies;
+    }
+    $menuLinks = $this->buildMenuPlacement($entity);
+    if ($menuLinks) {
+      $metadata['menu_links'] = $menuLinks;
+    }
+    $redirects = $this->buildRedirects($entity);
+    if ($redirects) {
+      $metadata['redirects'] = $redirects;
+    }
+
+    return $metadata;
+  }
+
+  /**
+   * Collect taxonomy-term assignments from the entity's reference fields.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity (default translation; term identity is shared).
+   *
+   * @return array
+   *   One entry per populated taxonomy reference field.
+   */
+  protected function buildTaxonomyAssignments(ContentEntityInterface $entity): array {
+    $assignments = [];
+    foreach ($entity->getFieldDefinitions() as $fieldName => $definition) {
+      if ($definition->getSetting('target_type') !== 'taxonomy_term') {
+        continue;
+      }
+      if (!$entity->hasField($fieldName) || $entity->get($fieldName)->isEmpty()) {
+        continue;
+      }
+      $terms = [];
+      foreach ($entity->get($fieldName) as $item) {
+        $term = $item->entity;
+        if (!$term instanceof ContentEntityInterface) {
+          continue;
+        }
+        $labels = [];
+        foreach ($term->getTranslationLanguages() as $termLangcode => $language) {
+          $labels[$termLangcode] = $term->getTranslation($termLangcode)->label();
+        }
+        $terms[] = [
+          'tid' => is_numeric($term->id()) ? (int) $term->id() : $term->id(),
+          'uuid' => method_exists($term, 'uuid') ? $term->uuid() : NULL,
+          'name' => $term->label(),
+          'labels' => $labels,
+          'vocabulary' => $term->bundle(),
+        ];
+      }
+      if ($terms) {
+        $assignments[] = [
+          'field' => $fieldName,
+          'terms' => $terms,
+        ];
+      }
+    }
+
+    return $assignments;
+  }
+
+  /**
+   * Collect menu placement for a node entity.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   *
+   * @return array
+   *   Menu link entries ({menu_name, title, parent, weight, enabled}).
+   */
+  protected function buildMenuPlacement(ContentEntityInterface $entity): array {
+    if (!$this->menuLinkManager || $entity->getEntityTypeId() !== 'node') {
+      return [];
+    }
+
+    $links = [];
+    try {
+      $instances = $this->menuLinkManager->loadLinksByRoute('entity.node.canonical', ['node' => $entity->id()]);
+    }
+    catch (\Exception) {
+      return [];
+    }
+    foreach ($instances as $instance) {
+      $links[] = [
+        'menu_name' => $instance->getMenuName(),
+        'title' => (string) $instance->getTitle(),
+        'parent' => $instance->getParent() ?: NULL,
+        'weight' => (int) $instance->getWeight(),
+        'enabled' => (bool) $instance->isEnabled(),
+      ];
+    }
+
+    return $links;
+  }
+
+  /**
+   * Collect redirects that point at the entity's canonical path.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   *
+   * @return array
+   *   Redirect entries ({source, langcode, status_code}).
+   */
+  protected function buildRedirects(ContentEntityInterface $entity): array {
+    if (!$this->moduleHandler || !$this->moduleHandler->moduleExists('redirect')) {
+      return [];
+    }
+    $storage = $this->entityTypeManager->getStorage('redirect');
+
+    $redirects = [];
+    try {
+      $ids = $storage->getQuery()
+        ->accessCheck(FALSE)
+        ->condition('redirect_redirect__uri', [
+          'internal:/' . $entity->getEntityTypeId() . '/' . $entity->id(),
+          'entity:' . $entity->getEntityTypeId() . '/' . $entity->id(),
+        ], 'IN')
+        ->execute();
+    }
+    catch (\Exception) {
+      return [];
+    }
+    foreach ($storage->loadMultiple($ids) as $redirect) {
+      $source = method_exists($redirect, 'getSourcePathWithQuery') ? $redirect->getSourcePathWithQuery() : NULL;
+      $redirects[] = [
+        'source' => $source,
+        'langcode' => $redirect->language()->getId(),
+        'status_code' => method_exists($redirect, 'getStatusCode') ? (int) $redirect->getStatusCode() : NULL,
+      ];
+    }
+
+    return $redirects;
   }
 
   /**
