@@ -50,7 +50,7 @@ class Exporter {
   /**
    * Export contract schema version.
    */
-  public const MIGRATION_SCHEMA_VERSION = '0.2.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.3.0';
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -117,11 +117,263 @@ class Exporter {
     }
     unset($page);
 
+    // Step-3 content (schema 0.3.0): taxonomy trees, menus, and entities
+    // without pagedesigner roots — compositions reference them, so they
+    // must exist on the target first.
+    $taxonomies = $this->exportTaxonomies();
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'taxonomies.json', $taxonomies);
+    $menus = $this->exportMenus();
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'menus.json', $menus);
+
+    $pd_entity_ids = [];
+    foreach ($manifest['pages'] as $page) {
+      $pd_entity_ids[(string) ($page['entity_type'] ?? 'node') . ':' . (string) ($page['entity_id'] ?? '')] = TRUE;
+    }
+    $entities = $this->discoverPlainEntities($options, $pd_entity_ids);
+    foreach ($entities as &$entity_entry) {
+      $payload = $this->exportPlainEntity($entity_entry, $sanitizeLocalUrls);
+      $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . $entity_entry['export_file'], $payload);
+      $entity_entry['content_hash'] = sha1(json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '');
+    }
+    unset($entity_entry);
+
+    $manifest['content'] = [
+      'taxonomies_file' => 'taxonomies.json',
+      'vocabulary_count' => count($taxonomies['vocabularies'] ?? []),
+      'menus_file' => 'menus.json',
+      'menu_count' => count($menus['menus'] ?? []),
+      'entities' => $entities,
+    ];
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
 
     return [
       'manifest' => $manifest,
       'page_count' => count($manifest['pages']),
+      'entity_count' => count($entities),
+    ];
+  }
+
+  /**
+   * Export every vocabulary with its full term tree and translations.
+   */
+  protected function exportTaxonomies(): array {
+    $vocabularies = [];
+    if (!$this->entityTypeManager->hasDefinition('taxonomy_term')) {
+      return ['vocabularies' => []];
+    }
+    $vocabulary_storage = $this->entityTypeManager->getStorage('taxonomy_vocabulary');
+    $term_storage = $this->entityTypeManager->getStorage('taxonomy_term');
+
+    foreach ($vocabulary_storage->loadMultiple() as $vocabulary) {
+      $terms = [];
+      foreach ($term_storage->loadTree($vocabulary->id(), 0, NULL, TRUE) as $term) {
+        /** @var \Drupal\taxonomy\TermInterface $term */
+        $labels = [];
+        foreach ($term->getTranslationLanguages() as $langcode => $language) {
+          $labels[$langcode] = $term->getTranslation($langcode)->label();
+        }
+        $parents = $term_storage->loadParents($term->id());
+        $parent = $parents ? (int) reset($parents)->id() : 0;
+        $terms[] = [
+          'tid' => (int) $term->id(),
+          'uuid' => $term->uuid(),
+          'name' => $term->label(),
+          'labels' => $labels,
+          'description' => (string) ($term->getDescription() ?? ''),
+          'parent' => $parent,
+          'weight' => (int) $term->getWeight(),
+        ];
+      }
+      $vocabularies[] = [
+        'vid' => $vocabulary->id(),
+        'label' => $vocabulary->label(),
+        'terms' => $terms,
+      ];
+    }
+
+    return ['vocabularies' => $vocabularies];
+  }
+
+  /**
+   * Export custom menus with their menu_link_content trees.
+   */
+  protected function exportMenus(): array {
+    $menus = [];
+    if (!$this->entityTypeManager->hasDefinition('menu_link_content')) {
+      return ['menus' => []];
+    }
+    $menu_storage = $this->entityTypeManager->getStorage('menu');
+    $link_storage = $this->entityTypeManager->getStorage('menu_link_content');
+
+    foreach ($menu_storage->loadMultiple() as $menu) {
+      $link_ids = $link_storage->getQuery()
+        ->accessCheck(FALSE)
+        ->condition('menu_name', $menu->id())
+        ->sort('weight', 'ASC')
+        ->execute();
+      if (!$link_ids) {
+        continue;
+      }
+      $links = [];
+      foreach ($link_storage->loadMultiple($link_ids) as $link) {
+        /** @var \Drupal\menu_link_content\MenuLinkContentInterface $link */
+        $titles = [];
+        foreach ($link->getTranslationLanguages() as $langcode => $language) {
+          $titles[$langcode] = $link->getTranslation($langcode)->getTitle();
+        }
+        $links[] = [
+          'uuid' => $link->uuid(),
+          'title' => $link->getTitle(),
+          'titles' => $titles,
+          'uri' => $link->link->uri ?? '',
+          'parent' => (string) $link->getParentId(),
+          'weight' => (int) $link->getWeight(),
+          'enabled' => $link->isEnabled(),
+          'expanded' => $link->isExpanded(),
+          'langcode' => $link->language()->getId(),
+        ];
+      }
+      $menus[] = [
+        'id' => $menu->id(),
+        'label' => $menu->label(),
+        'links' => $links,
+      ];
+    }
+
+    return ['menus' => $menus];
+  }
+
+  /**
+   * Discover content entities without pagedesigner roots.
+   *
+   * @param array $options
+   *   Export options (entity_type, bundle filters apply here too).
+   * @param array $pd_entity_ids
+   *   Map of "entity_type:id" already exported as pagedesigner pages.
+   *
+   * @return array
+   *   Manifest entity entries (without content_hash yet).
+   */
+  protected function discoverPlainEntities(array $options, array $pd_entity_ids): array {
+    $entityTypeId = (string) ($options['entity_type'] ?? 'node');
+    $entityType = $this->entityTypeManager->getDefinition($entityTypeId, FALSE);
+    if (!$entityType || !$entityType->entityClassImplements(ContentEntityInterface::class)) {
+      return [];
+    }
+    $storage = $this->entityTypeManager->getStorage($entityTypeId);
+    $idKey = $entityType->getKey('id') ?: 'id';
+    $includeUnpublished = (bool) ($options['include_unpublished'] ?? FALSE);
+    $limit = isset($options['entity_limit']) && $options['entity_limit'] !== NULL && $options['entity_limit'] !== ''
+      ? (int) $options['entity_limit']
+      : NULL;
+
+    $query = $storage->getQuery()->accessCheck(FALSE)->sort($idKey, 'ASC');
+    $ids = $query->execute();
+    $entries = [];
+    $pd_fields_by_bundle = [];
+    foreach ($storage->loadMultiple($ids) as $entity) {
+      $key = $entityTypeId . ':' . $entity->id();
+      if (isset($pd_entity_ids[$key])) {
+        continue;
+      }
+      // A pagedesigner-bearing entity is a composition page even when the
+      // page limit kept it out of this run's pages — never a plain entity.
+      $bundle = $entity->bundle();
+      if (!array_key_exists($bundle, $pd_fields_by_bundle)) {
+        $pd_fields_by_bundle[$bundle] = $this->getPagedesignerFields($entityTypeId, $bundle, NULL);
+      }
+      if ($pd_fields_by_bundle[$bundle]) {
+        $all_langcodes = $this->getExportableLangcodes($entity, TRUE);
+        if ($this->getPagedesignerRootsByField($entity, $pd_fields_by_bundle[$bundle], $all_langcodes)) {
+          continue;
+        }
+      }
+      $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+      if (!$langcodes) {
+        continue;
+      }
+      $titles = [];
+      $paths = [];
+      $statuses = [];
+      foreach ($langcodes as $langcode) {
+        $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+        $titles[$langcode] = $translation->label();
+        $paths[$langcode] = $this->getEntityPath($translation, $langcode);
+        $statuses[$langcode] = $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE;
+      }
+      $entry = [
+        'id' => $key,
+        'entity_type' => $entityTypeId,
+        'bundle' => $entity->bundle(),
+        'entity_id' => is_numeric($entity->id()) ? (int) $entity->id() : $entity->id(),
+        'uuid' => method_exists($entity, 'uuid') ? $entity->uuid() : NULL,
+        'default_langcode' => $entity->language()->getId(),
+        'langcodes' => $langcodes,
+        'titles' => $titles,
+        'paths' => $paths,
+        'statuses' => $statuses,
+        'export_file' => 'entities/' . preg_replace('/[^A-Za-z0-9_.-]+/', '-', $entityTypeId . '-' . $entity->id()) . '.json',
+      ];
+      $entry += $this->buildEntityMetadata($entity, $langcodes);
+      $entries[] = $entry;
+      if ($limit !== NULL && count($entries) >= $limit) {
+        break;
+      }
+    }
+
+    return $entries;
+  }
+
+  /**
+   * Export a plain (non-pagedesigner) entity's fields per translation.
+   */
+  protected function exportPlainEntity(array $entry, bool $sanitizeLocalUrls): array {
+    $storage = $this->entityTypeManager->getStorage((string) $entry['entity_type']);
+    /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
+    $entity = $storage->load($entry['entity_id']);
+    $skipFields = [
+      'nid', 'vid', 'id', 'uuid', 'type', 'uid', 'title', 'status', 'created',
+      'changed', 'promote', 'sticky', 'default_langcode', 'langcode', 'path',
+      'menu_link', 'comment', 'revision_timestamp', 'revision_uid',
+      'revision_log', 'revision_default', 'revision_translation_affected',
+      'content_translation_source', 'content_translation_outdated',
+      'metatag',
+    ];
+
+    $translations = [];
+    foreach ($entry['langcodes'] as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      $fields = [];
+      foreach ($translation->getFieldDefinitions() as $fieldName => $definition) {
+        if (in_array($fieldName, $skipFields, TRUE) || str_starts_with($fieldName, 'revision_')) {
+          continue;
+        }
+        if (!$translation->hasField($fieldName) || $translation->get($fieldName)->isEmpty()) {
+          continue;
+        }
+        $values = $translation->get($fieldName)->getValue();
+        $values = $this->enrichReferenceFieldValues($values, $definition, $langcode, $sanitizeLocalUrls);
+        if ($sanitizeLocalUrls) {
+          $values = $this->sanitizeFieldValues($values);
+        }
+        $fields[$fieldName] = $values;
+      }
+      $translations[$langcode] = [
+        'title' => $translation->label(),
+        'status' => $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE,
+        'fields' => $fields,
+      ];
+    }
+
+    return [
+      'schema_version' => self::MIGRATION_SCHEMA_VERSION,
+      'id' => $entry['id'],
+      'entity_type' => $entry['entity_type'],
+      'bundle' => $entry['bundle'],
+      'entity_id' => $entry['entity_id'],
+      'uuid' => $entry['uuid'],
+      'default_langcode' => $entry['default_langcode'],
+      'translations' => $translations,
     ];
   }
 
