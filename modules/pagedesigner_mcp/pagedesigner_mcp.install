@@ -1,0 +1,29 @@
+<?php
+
+/**
+ * @file
+ * Install/uninstall hooks: the MCP service account lives and dies with the
+ * module — enable for the migration window, uninstall after.
+ */
+
+declare(strict_types=1);
+
+/**
+ * Implements hook_install().
+ */
+function pagedesigner_mcp_install(): void {
+  $password = pagedesigner_mcp_ensure_service_account();
+  if ($password !== NULL) {
+    \Drupal::messenger()->addStatus(t(
+      'Created MCP service user %name with password %password — shown only this once; rotate with `drush upwd %name`. Export config (drush cex) so the pagedesigner_mcp role survives the next config import.',
+      ['%name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT, '%password' => $password],
+    ));
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function pagedesigner_mcp_uninstall(): void {
+  pagedesigner_mcp_remove_service_account();
+}

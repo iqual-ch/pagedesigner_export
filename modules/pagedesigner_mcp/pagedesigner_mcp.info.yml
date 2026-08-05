@@ -1,0 +1,8 @@
+name: 'Pagedesigner MCP'
+description: 'Read-only MCP tools exposing the Pagedesigner migration exporter (manifest, page trees, taxonomies, menus, plain entities) to the iqual ai-platform content-migrator agent. Enable only during a site''s migration window.'
+package: Pagedesigner
+type: module
+core_version_requirement: ^10.3 || ^11
+dependencies:
+  - pagedesigner_export:pagedesigner_export
+  - mcp:mcp

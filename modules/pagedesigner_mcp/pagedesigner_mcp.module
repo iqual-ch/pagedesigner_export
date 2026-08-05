@@ -1,0 +1,79 @@
+<?php
+
+/**
+ * @file
+ * Owns the MCP service account (role + user) the migration agent
+ * authenticates as on the SOURCE site.
+ */
+
+declare(strict_types=1);
+
+use Drupal\user\Entity\Role;
+use Drupal\user\Entity\User;
+
+/**
+ * Machine name of the service role and user this module owns.
+ */
+const PAGEDESIGNER_MCP_SERVICE_ACCOUNT = 'pagedesigner_mcp';
+
+/**
+ * Ensure the MCP service role and user exist with exactly the MCP grants.
+ *
+ * Same lifecycle as icms_mcp on targets: the module is enabled per site only
+ * during its migration window, so install creates the account and uninstall
+ * removes it — no standing credential on the fleet. The role is a config
+ * entity: run `drush cex` after install or the next config import deletes it.
+ *
+ * @return string|null
+ *   The generated password when the user was newly created (shown exactly
+ *   once — rotate any time with `drush upwd pagedesigner_mcp`), NULL otherwise.
+ */
+function pagedesigner_mcp_ensure_service_account(): ?string {
+  $role = Role::load(PAGEDESIGNER_MCP_SERVICE_ACCOUNT);
+  if ($role === NULL) {
+    $role = Role::create([
+      'id' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT,
+      'label' => 'Pagedesigner MCP',
+    ]);
+  }
+  foreach (['use mcp server', 'use pagedesigner_mcp tools'] as $permission) {
+    $role->grantPermission($permission);
+  }
+  $role->save();
+
+  $existing = \Drupal::entityTypeManager()->getStorage('user')
+    ->loadByProperties(['name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT]);
+  if ($existing) {
+    /** @var \Drupal\user\UserInterface $user */
+    $user = reset($existing);
+    if (!$user->hasRole(PAGEDESIGNER_MCP_SERVICE_ACCOUNT)) {
+      $user->addRole(PAGEDESIGNER_MCP_SERVICE_ACCOUNT);
+      $user->save();
+    }
+    return NULL;
+  }
+
+  $password = \Drupal::service('password_generator')->generate(24);
+  User::create([
+    'name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT,
+    'status' => 1,
+    'roles' => [PAGEDESIGNER_MCP_SERVICE_ACCOUNT],
+    'pass' => $password,
+  ])->save();
+  \Drupal::logger('pagedesigner_mcp')->notice('Created the @name service user and role. Export config (drush cex) so the next config import keeps the role.', [
+    '@name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT,
+  ]);
+  return $password;
+}
+
+/**
+ * Remove the MCP service user and role this module created.
+ */
+function pagedesigner_mcp_remove_service_account(): void {
+  $users = \Drupal::entityTypeManager()->getStorage('user')
+    ->loadByProperties(['name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT]);
+  foreach ($users as $user) {
+    $user->delete();
+  }
+  Role::load(PAGEDESIGNER_MCP_SERVICE_ACCOUNT)?->delete();
+}

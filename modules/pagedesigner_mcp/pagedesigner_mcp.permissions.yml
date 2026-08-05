@@ -1,0 +1,4 @@
+'use pagedesigner_mcp tools':
+  title: 'Use Pagedesigner MCP tools'
+  description: 'Allows the bearer to call the pagedesigner_mcp:* export tools (manifest, page trees, taxonomies, menus, entities) via the Drupal MCP module. Read-only, but the export contains ALL content including unpublished — grant only to the dedicated MCP service user during the migration window.'
+  restrict access: true

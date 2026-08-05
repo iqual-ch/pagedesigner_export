@@ -156,7 +156,7 @@ class Exporter {
   /**
    * Export every vocabulary with its full term tree and translations.
    */
-  protected function exportTaxonomies(): array {
+  public function exportTaxonomies(): array {
     $vocabularies = [];
     if (!$this->entityTypeManager->hasDefinition('taxonomy_term')) {
       return ['vocabularies' => []];
@@ -197,7 +197,7 @@ class Exporter {
   /**
    * Export custom menus with their menu_link_content trees.
    */
-  protected function exportMenus(): array {
+  public function exportMenus(): array {
     $menus = [];
     if (!$this->entityTypeManager->hasDefinition('menu_link_content')) {
       return ['menus' => []];
@@ -254,7 +254,7 @@ class Exporter {
    * @return array
    *   Manifest entity entries (without content_hash yet).
    */
-  protected function discoverPlainEntities(array $options, array $pd_entity_ids): array {
+  public function discoverPlainEntities(array $options, array $pd_entity_ids): array {
     $entityTypeId = (string) ($options['entity_type'] ?? 'node');
     $entityType = $this->entityTypeManager->getDefinition($entityTypeId, FALSE);
     if (!$entityType || !$entityType->entityClassImplements(ContentEntityInterface::class)) {
@@ -327,7 +327,7 @@ class Exporter {
   /**
    * Export a plain (non-pagedesigner) entity's fields per translation.
    */
-  protected function exportPlainEntity(array $entry, bool $sanitizeLocalUrls): array {
+  public function exportPlainEntity(array $entry, bool $sanitizeLocalUrls): array {
     $storage = $this->entityTypeManager->getStorage((string) $entry['entity_type']);
     /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
     $entity = $storage->load($entry['entity_id']);
