@@ -11,6 +11,7 @@
   "require": {
     "php": "^8.1",
     "drupal/core": "^11",
-    "drupal/pagedesigner": "^4.2"
+    "drupal/pagedesigner": "^4.2",
+    "drupal/mcp": "^1.2"
   }
 }
