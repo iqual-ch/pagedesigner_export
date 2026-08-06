@@ -22,19 +22,38 @@ The export contains **everything, including unpublished/intranet content**.
 Therefore:
 
 - Enable the module **only during a site's migration window**; uninstall
-  after. Install creates a `pagedesigner_mcp` role (only `Use MCP server` +
-  `Use Pagedesigner MCP tools`) and an active `pagedesigner_mcp` user with a
-  generated password **printed exactly once**; uninstall deletes both — no
-  standing credential on the fleet.
-- Rotate any time with `drush upwd pagedesigner_mcp '<new password>'`.
-- The role is a config entity: run `drush cex` after install, or the next
-  config import deletes it.
+  after. Install provisions the full OAuth 2.1 chain and uninstall removes
+  it — no standing credential on the fleet.
+
+## Authentication — OAuth 2.1 client_credentials
+
+Install (and `drush updb`, update 10101) provisions everything:
+
+1. simple_oauth **signing keys** outside the webroot (`../keys/`, never in
+   git) — skipped when the site already has keys.
+2. A `pagedesigner_mcp` **scope** with ROLE granularity: tokens carry exactly
+   the `pagedesigner_mcp` role's permissions.
+3. A **confidential consumer** (`client_id: pagedesigner_mcp`,
+   client_credentials grant, 1h tokens) bound to a **passwordless** service
+   user. The `client_id` + `client_secret` print **exactly once** — paste
+   them into the cockpit connection form. Rotate with
+   `drush pagedesigner-mcp:rotate-secret`.
+4. A route subscriber allows the `oauth2` provider on `/mcp` (mcp_server
+   declares `_auth: ['cookie']`, which excludes even global providers).
+
+Consumer, scope, and role are config: run `drush cex` after install, or the
+next config import deletes them.
 
 ## Setup
 
 ```bash
-drush en pagedesigner_mcp -y   # note the printed password
+composer require iqual/pagedesigner_export   # pulls mcp_server + simple_oauth + consumers
+drush en pagedesigner_mcp -y                 # note the printed client credentials
+drush cex -y
 ```
 
-Then `/admin/config/mcp` — enable token auth and the `pagedesigner-mcp`
-plugin (hyphen, not underscore).
+MCP endpoint: `POST /mcp` with `Authorization: Bearer <access_token>` from
+`POST /oauth/token` (grant_type=client_credentials, scope=pagedesigner_mcp).
+
+The legacy drupal/mcp plugin (`/mcp/post`, basic auth) keeps working on
+sites that still have `drupal/mcp` enabled — transition only.

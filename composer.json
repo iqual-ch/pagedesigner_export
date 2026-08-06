@@ -1,17 +1,20 @@
 {
-  "name": "iqual/pagedesigner_export",
-  "description": "Exports and imports Pagedesigner element trees with full translation support",
-  "type": "drupal-custom-module",
-  "repositories": [
-    {
-      "type": "composer",
-      "url": "https://github.com/iqual-ch/pagedesigner_export"
+    "name": "iqual/pagedesigner_export",
+    "description": "Exports and imports Pagedesigner element trees with full translation support",
+    "type": "drupal-custom-module",
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://github.com/iqual-ch/pagedesigner_export"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "drupal/core": "^11",
+        "drupal/pagedesigner": "^4.2",
+        "drupal/mcp": "^1.2",
+        "drupal/mcp_server": "^2.0@beta",
+        "drupal/simple_oauth": "^6.1",
+        "drupal/consumers": "^1.24"
     }
-  ],
-  "require": {
-    "php": "^8.1",
-    "drupal/core": "^11",
-    "drupal/pagedesigner": "^4.2",
-    "drupal/mcp": "^1.2"
-  }
 }

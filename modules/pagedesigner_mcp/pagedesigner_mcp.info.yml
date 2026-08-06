@@ -5,4 +5,6 @@ type: module
 core_version_requirement: ^10.3 || ^11
 dependencies:
   - pagedesigner_export:pagedesigner_export
-  - mcp:mcp
+  - mcp_server:mcp_server
+  - simple_oauth:simple_oauth
+  - consumers:consumers

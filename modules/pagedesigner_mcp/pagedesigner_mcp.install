@@ -2,8 +2,8 @@
 
 /**
  * @file
- * Install/uninstall hooks: the MCP service account lives and dies with the
- * module — enable for the migration window, uninstall after.
+ * Install/uninstall hooks: the MCP service account and OAuth client live and
+ * die with the module — enable for the migration window, uninstall after.
  */
 
 declare(strict_types=1);
@@ -12,11 +12,12 @@ declare(strict_types=1);
  * Implements hook_install().
  */
 function pagedesigner_mcp_install(): void {
-  $password = pagedesigner_mcp_ensure_service_account();
-  if ($password !== NULL) {
+  pagedesigner_mcp_ensure_service_account();
+  $credentials = pagedesigner_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
     \Drupal::messenger()->addStatus(t(
-      'Created MCP service user %name with password %password — shown only this once; rotate with `drush upwd %name`. Export config (drush cex) so the pagedesigner_mcp role survives the next config import.',
-      ['%name' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT, '%password' => $password],
+      'Created the Pagedesigner MCP OAuth client — client_id %id, client_secret %secret. Shown only this once: paste both into the cockpit connection form. Rotate with `drush pagedesigner-mcp:rotate-secret`. Export config (drush cex) so the consumer, scope, and role survive the next config import.',
+      ['%id' => $credentials['client_id'], '%secret' => $credentials['client_secret']],
     ));
   }
 }
@@ -26,4 +27,20 @@ function pagedesigner_mcp_install(): void {
  */
 function pagedesigner_mcp_uninstall(): void {
   pagedesigner_mcp_remove_service_account();
+}
+
+/**
+ * Switch to mcp_server + OAuth 2.1: keys, scope, consumer, permissions.
+ */
+function pagedesigner_mcp_update_10101(): string {
+  \Drupal::service('module_installer')->install(['mcp_server', 'simple_oauth', 'consumers']);
+  pagedesigner_mcp_ensure_service_account();
+  $credentials = pagedesigner_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
+    return 'Created the Pagedesigner MCP OAuth client — client_id ' . $credentials['client_id']
+      . ', client_secret ' . $credentials['client_secret']
+      . ' — shown only this once: paste both into the cockpit connection form.'
+      . ' Rotate with drush pagedesigner-mcp:rotate-secret. Export config (drush cex).';
+  }
+  return 'OAuth client ensured; the consumer already existed (secret untouched).';
 }
