@@ -279,6 +279,11 @@ class Exporter {
       // A pagedesigner-bearing entity is a composition page even when the
       // page limit kept it out of this run's pages — never a plain entity.
       $bundle = $entity->bundle();
+      // Pagedesigner-ecosystem bundles are editor infrastructure, never
+      // migratable content (see discoverMigrationPages).
+      if (str_starts_with($bundle, 'pagedesigner')) {
+        continue;
+      }
       if (!array_key_exists($bundle, $pd_fields_by_bundle)) {
         $pd_fields_by_bundle[$bundle] = $this->getPagedesignerFields($entityTypeId, $bundle, NULL);
       }
@@ -484,6 +489,12 @@ class Exporter {
     $pages = [];
 
     foreach ($bundles as $bundle) {
+      // Pagedesigner-ecosystem bundles (pagedesigner_part reusable snippets
+      // etc.) are editor infrastructure, not site content — their markup is
+      // already inlined where pages use them. Never migrate them.
+      if (str_starts_with($bundle, 'pagedesigner')) {
+        continue;
+      }
       $pagedesignerFields = $this->getPagedesignerFields($entityTypeId, $bundle, $fieldFilter);
       if (!$pagedesignerFields) {
         continue;
