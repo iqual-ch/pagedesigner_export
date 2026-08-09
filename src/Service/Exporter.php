@@ -50,7 +50,7 @@ class Exporter {
   /**
    * Export contract schema version.
    */
-  public const MIGRATION_SCHEMA_VERSION = '0.3.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.4.0';
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -330,43 +330,89 @@ class Exporter {
   }
 
   /**
+   * Base and bookkeeping fields no migration ever maps.
+   *
+   * Identity, workflow flags and revision metadata: the manifest already
+   * carries what matters (title, status, dates, author, path), and the rest is
+   * storage plumbing.
+   */
+  protected const SKIP_FIELDS = [
+    'nid', 'vid', 'id', 'uuid', 'type', 'uid', 'title', 'status', 'created',
+    'changed', 'promote', 'sticky', 'default_langcode', 'langcode', 'path',
+    'menu_link', 'comment', 'revision_timestamp', 'revision_uid',
+    'revision_log', 'revision_default', 'revision_translation_affected',
+    'content_translation_source', 'content_translation_outdated',
+    'metatag',
+  ];
+
+  /**
+   * Field types that are plugin plumbing, never migratable content.
+   *
+   * SEO modules attach these under project-specific names
+   * (`field_meta_tags`, `field_yoast_seo`), so the type is the only stable
+   * way to recognise them.
+   */
+  protected const SKIP_FIELD_TYPES = ['metatag', 'yoast_seo'];
+
+  /**
+   * One translation's own field values, enriched and optionally sanitized.
+   *
+   * Shared by plain entities and pagedesigner pages: a composition page's node
+   * carries content of its own (lead text, teaser image, documents) that the
+   * element tree knows nothing about, and the migration cannot map what was
+   * never exported.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $translation
+   *   The entity in the language being exported.
+   * @param string $langcode
+   *   That language.
+   * @param bool $sanitizeLocalUrls
+   *   Whether to rewrite local URLs.
+   * @param string[] $additionalSkipFields
+   *   Extra field names to omit — a page's pagedesigner field, whose tree is
+   *   exported separately and must not be duplicated here.
+   *
+   * @return array
+   *   Field name => field values.
+   */
+  protected function collectEntityFields(ContentEntityInterface $translation, string $langcode, bool $sanitizeLocalUrls, array $additionalSkipFields = []): array {
+    $skipFields = array_merge(self::SKIP_FIELDS, $additionalSkipFields);
+    $fields = [];
+    foreach ($translation->getFieldDefinitions() as $fieldName => $definition) {
+      if (in_array($fieldName, $skipFields, TRUE) || str_starts_with($fieldName, 'revision_')) {
+        continue;
+      }
+      if (in_array($definition->getType(), self::SKIP_FIELD_TYPES, TRUE)) {
+        continue;
+      }
+      if (!$translation->hasField($fieldName) || $translation->get($fieldName)->isEmpty()) {
+        continue;
+      }
+      $values = $translation->get($fieldName)->getValue();
+      $values = $this->enrichReferenceFieldValues($values, $definition, $langcode, $sanitizeLocalUrls);
+      if ($sanitizeLocalUrls) {
+        $values = $this->sanitizeFieldValues($values);
+      }
+      $fields[$fieldName] = $values;
+    }
+    return $fields;
+  }
+
+  /**
    * Export a plain (non-pagedesigner) entity's fields per translation.
    */
   public function exportPlainEntity(array $entry, bool $sanitizeLocalUrls): array {
     $storage = $this->entityTypeManager->getStorage((string) $entry['entity_type']);
     /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
     $entity = $storage->load($entry['entity_id']);
-    $skipFields = [
-      'nid', 'vid', 'id', 'uuid', 'type', 'uid', 'title', 'status', 'created',
-      'changed', 'promote', 'sticky', 'default_langcode', 'langcode', 'path',
-      'menu_link', 'comment', 'revision_timestamp', 'revision_uid',
-      'revision_log', 'revision_default', 'revision_translation_affected',
-      'content_translation_source', 'content_translation_outdated',
-      'metatag',
-    ];
 
     $translations = [];
     foreach ($entry['langcodes'] as $langcode) {
       $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
-      $fields = [];
-      foreach ($translation->getFieldDefinitions() as $fieldName => $definition) {
-        if (in_array($fieldName, $skipFields, TRUE) || str_starts_with($fieldName, 'revision_')) {
-          continue;
-        }
-        if (!$translation->hasField($fieldName) || $translation->get($fieldName)->isEmpty()) {
-          continue;
-        }
-        $values = $translation->get($fieldName)->getValue();
-        $values = $this->enrichReferenceFieldValues($values, $definition, $langcode, $sanitizeLocalUrls);
-        if ($sanitizeLocalUrls) {
-          $values = $this->sanitizeFieldValues($values);
-        }
-        $fields[$fieldName] = $values;
-      }
       $translations[$langcode] = [
         'title' => $translation->label(),
         'status' => $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE,
-        'fields' => $fields,
+        'fields' => $this->collectEntityFields($translation, $langcode, $sanitizeLocalUrls),
       ];
     }
 
@@ -484,6 +530,7 @@ class Exporter {
     $bundleFilter = $options['bundle'] ?? NULL;
     $fieldFilter = $options['field'] ?? NULL;
     $includeUnpublished = (bool) ($options['include_unpublished'] ?? FALSE);
+    $sanitizeLocalUrls = (bool) ($options['sanitize_local_urls'] ?? TRUE);
     $limit = isset($options['limit']) && $options['limit'] !== NULL && $options['limit'] !== '' ? (int) $options['limit'] : NULL;
     $bundles = $this->getBundles($entityTypeId, $bundleFilter);
     $pages = [];
@@ -539,7 +586,7 @@ class Exporter {
         $rootCount = array_sum(array_map('count', $rootsByField));
         foreach ($rootsByField as $fieldName => $rootIds) {
           foreach ($rootIds as $rootId) {
-            $pages[] = $this->buildPageManifestEntry($entity, $fieldName, (string) $rootId, $langcodes, $rootCount > 1);
+            $pages[] = $this->buildPageManifestEntry($entity, $fieldName, (string) $rootId, $langcodes, $rootCount > 1, $sanitizeLocalUrls);
             if ($limit !== NULL && count($pages) >= $limit) {
               break 3;
             }
@@ -694,7 +741,7 @@ class Exporter {
    * @return array
    *   Manifest page entry.
    */
-  protected function buildPageManifestEntry(ContentEntityInterface $entity, string $fieldName, string $rootId, array $langcodes, bool $forceUniqueId): array {
+  protected function buildPageManifestEntry(ContentEntityInterface $entity, string $fieldName, string $rootId, array $langcodes, bool $forceUniqueId, bool $sanitizeLocalUrls = TRUE): array {
     $entityTypeId = $entity->getEntityTypeId();
     $entityId = (string) $entity->id();
     $defaultLangcode = $entity->language()->getId();
@@ -738,7 +785,7 @@ class Exporter {
       $entry['uuid'] = $entity->uuid();
     }
 
-    $entry += $this->buildEntityMetadata($entity, $langcodes);
+    $entry += $this->buildEntityMetadata($entity, $langcodes, $sanitizeLocalUrls, [$fieldName]);
 
     return $entry;
   }
@@ -758,12 +805,17 @@ class Exporter {
    * @return array
    *   Metadata keys to merge into the manifest entry.
    */
-  protected function buildEntityMetadata(ContentEntityInterface $entity, array $langcodes): array {
+  protected function buildEntityMetadata(ContentEntityInterface $entity, array $langcodes, bool $sanitizeLocalUrls = TRUE, array $skipFields = []): array {
     $created = [];
     $changed = [];
     $authors = [];
+    $fields = [];
     foreach ($langcodes as $langcode) {
       $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      $translationFields = $this->collectEntityFields($translation, $langcode, $sanitizeLocalUrls, $skipFields);
+      if ($translationFields) {
+        $fields[$langcode] = $translationFields;
+      }
       if (method_exists($translation, 'getCreatedTime')) {
         $created[$langcode] = (int) $translation->getCreatedTime();
       }
@@ -788,6 +840,12 @@ class Exporter {
     }
     if ($authors) {
       $metadata['authors'] = $authors;
+    }
+    // The node's own fields, per language. A composition page carries content
+    // the element tree knows nothing about — lead text, teaser image,
+    // documents — and the migration cannot map what was never exported.
+    if ($fields) {
+      $metadata['fields'] = $fields;
     }
 
     $taxonomies = $this->buildTaxonomyAssignments($entity);
@@ -1211,8 +1269,9 @@ class Exporter {
       }
 
       $values[$delta]['referenced_entity'] = $metadata;
-      if (!empty($metadata['files'][0]) && is_array($metadata['files'][0])) {
-        $firstFile = $metadata['files'][0];
+      $payloadFile = $this->pickMediaPayloadFile($metadata);
+      if ($payloadFile) {
+        $firstFile = $payloadFile;
         $values[$delta]['file_target_id'] = $firstFile['target_id'] ?? NULL;
         $values[$delta]['filename'] = $firstFile['filename'] ?? NULL;
         $values[$delta]['uri'] = $firstFile['uri'] ?? NULL;
@@ -1279,8 +1338,64 @@ class Exporter {
       'bundle' => $media->bundle(),
       'label' => $media->label(),
       'langcode' => $media->language()->getId(),
+      // `files` is field-definition ordered, so `thumbnail` — Drupal's
+      // generated preview — can precede the media's real payload. Naming the
+      // source field lets a consumer pick the file the media actually is.
+      'source_field' => $this->getMediaSourceFieldName($media),
       'files' => $files,
     ];
+  }
+
+  /**
+   * The file a media entity actually carries, not its generated thumbnail.
+   *
+   * @param array $metadata
+   *   Media reference metadata from buildMediaReferenceMetadata().
+   *
+   * @return array|null
+   *   The payload file entry, or NULL when the media carries no file.
+   */
+  protected function pickMediaPayloadFile(array $metadata): ?array {
+    $files = array_values(array_filter($metadata['files'] ?? [], 'is_array'));
+    if (!$files) {
+      return NULL;
+    }
+    $sourceField = (string) ($metadata['source_field'] ?? '');
+    if ($sourceField !== '') {
+      foreach ($files as $file) {
+        if (($file['field_name'] ?? '') === $sourceField) {
+          return $file;
+        }
+      }
+    }
+    foreach ($files as $file) {
+      if (($file['field_name'] ?? '') !== 'thumbnail') {
+        return $file;
+      }
+    }
+    return $files[0];
+  }
+
+  /**
+   * The field a media type stores its actual file in.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $media
+   *   The media entity.
+   *
+   * @return string
+   *   The source field name, or '' when it cannot be resolved.
+   */
+  protected function getMediaSourceFieldName(ContentEntityInterface $media): string {
+    if (!method_exists($media, 'getSource')) {
+      return '';
+    }
+    try {
+      $configuration = $media->getSource()->getConfiguration();
+      return (string) ($configuration['source_field'] ?? '');
+    }
+    catch (\Throwable $exception) {
+      return '';
+    }
   }
 
   /**
