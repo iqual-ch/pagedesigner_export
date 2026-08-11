@@ -50,7 +50,11 @@ class Exporter {
   /**
    * Export contract schema version.
    */
-  public const MIGRATION_SCHEMA_VERSION = '0.4.0';
+  // 0.5.0 adds `field_definitions`: the declared schema of the fields an entity
+  // exports, so target setup can create a counterpart field instead of guessing
+  // its type from a sample value. Consumers check the MAJOR version only, so
+  // older readers keep working.
+  public const MIGRATION_SCHEMA_VERSION = '0.5.0';
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -375,6 +379,62 @@ class Exporter {
    * @return array
    *   Field name => field values.
    */
+  /**
+   * Declared schema of the fields an entity exports.
+   *
+   * The values alone cannot be migrated into a target field: a consumer that
+   * only sees `[{"value": "..."}]` has to guess the type, and guesses cannot
+   * create a field. This exports what Drupal actually declares, so target
+   * setup can create the counterpart without asking a human to retype it.
+   *
+   * Language-independent, so it is exported once per entity rather than per
+   * translation.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   The entity in its default language.
+   * @param string[] $additionalSkipFields
+   *   Extra field names to omit, matching collectEntityFields().
+   *
+   * @return array
+   *   Field name => declared schema.
+   */
+  protected function collectFieldDefinitions(ContentEntityInterface $entity, array $additionalSkipFields = []): array {
+    $skipFields = array_merge(self::SKIP_FIELDS, $additionalSkipFields);
+    $definitions = [];
+    foreach ($entity->getFieldDefinitions() as $fieldName => $definition) {
+      if (in_array($fieldName, $skipFields, TRUE) || str_starts_with($fieldName, 'revision_')) {
+        continue;
+      }
+      if (in_array($definition->getType(), self::SKIP_FIELD_TYPES, TRUE)) {
+        continue;
+      }
+      if (!$entity->hasField($fieldName) || $entity->get($fieldName)->isEmpty()) {
+        continue;
+      }
+      $settings = $definition->getSettings();
+      $handlerSettings = $settings['handler_settings'] ?? [];
+      $info = [
+        'type' => $definition->getType(),
+        // -1 means unlimited; the observed value count cannot reveal this.
+        'cardinality' => (int) $definition->getFieldStorageDefinition()->getCardinality(),
+        'label' => (string) $definition->getLabel(),
+        'required' => (bool) $definition->isRequired(),
+        'translatable' => (bool) $definition->isTranslatable(),
+      ];
+      if (!empty($settings['target_type'])) {
+        $info['target_type'] = (string) $settings['target_type'];
+      }
+      if (!empty($handlerSettings['target_bundles'])) {
+        $info['target_bundles'] = array_values(array_map('strval', $handlerSettings['target_bundles']));
+      }
+      if (!empty($settings['max_length'])) {
+        $info['max_length'] = (int) $settings['max_length'];
+      }
+      $definitions[$fieldName] = $info;
+    }
+    return $definitions;
+  }
+
   protected function collectEntityFields(ContentEntityInterface $translation, string $langcode, bool $sanitizeLocalUrls, array $additionalSkipFields = []): array {
     $skipFields = array_merge(self::SKIP_FIELDS, $additionalSkipFields);
     $fields = [];
@@ -424,6 +484,9 @@ class Exporter {
       'entity_id' => $entry['entity_id'],
       'uuid' => $entry['uuid'],
       'default_langcode' => $entry['default_langcode'],
+      // Declared schema, once per entity: the values alone cannot tell a
+      // consumer what field to create on the target.
+      'field_definitions' => $this->collectFieldDefinitions($entity),
       'translations' => $translations,
     ];
   }
@@ -846,6 +909,7 @@ class Exporter {
     // documents — and the migration cannot map what was never exported.
     if ($fields) {
       $metadata['fields'] = $fields;
+      $metadata['field_definitions'] = $this->collectFieldDefinitions($entity, $skipFields);
     }
 
     $taxonomies = $this->buildTaxonomyAssignments($entity);
