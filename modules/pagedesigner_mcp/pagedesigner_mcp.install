@@ -31,6 +31,9 @@ function pagedesigner_mcp_requirements(string $phase): array {
  * Implements hook_install().
  */
 function pagedesigner_mcp_install(): void {
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('pagedesigner_mcp');
   pagedesigner_mcp_ensure_service_account();
   $credentials = pagedesigner_mcp_ensure_oauth_client();
   if ($credentials !== NULL) {
@@ -53,6 +56,9 @@ function pagedesigner_mcp_uninstall(): void {
  */
 function pagedesigner_mcp_update_10101(): string {
   \Drupal::service('module_installer')->install(['mcp_server', 'simple_oauth', 'consumers']);
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('pagedesigner_mcp');
   pagedesigner_mcp_ensure_service_account();
   $credentials = pagedesigner_mcp_ensure_oauth_client();
   if ($credentials !== NULL) {

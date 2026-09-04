@@ -186,19 +186,3 @@ function pagedesigner_mcp_ensure_oauth_client(): ?array {
   ]);
   return ['client_id' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT, 'client_secret' => $secret];
 }
-
-/**
- * Rotate the OAuth consumer secret; returns the new secret (shown once).
- */
-function pagedesigner_mcp_rotate_oauth_secret(): string {
-  $consumers = \Drupal::entityTypeManager()->getStorage('consumer')
-    ->loadByProperties(['client_id' => PAGEDESIGNER_MCP_SERVICE_ACCOUNT]);
-  $consumer = reset($consumers);
-  if (!$consumer) {
-    throw new \RuntimeException('No ' . PAGEDESIGNER_MCP_SERVICE_ACCOUNT . ' consumer exists — reinstall the module or run its updates first.');
-  }
-  $secret = \Drupal::service('password_generator')->generate(32);
-  $consumer->set('secret', $secret);
-  $consumer->save();
-  return $secret;
-}
