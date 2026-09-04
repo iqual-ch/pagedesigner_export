@@ -41,7 +41,7 @@ final class McpServerAuthRouteSubscriber extends RouteSubscriberBase {
       $auth[] = 'oauth2';
       $route->setOption('_auth', $auth);
     }
-    $route->setOption('_disable_route_normalizer', TRUE);
+    $route->setDefault('_disable_route_normalizer', TRUE);
   }
 
 }
