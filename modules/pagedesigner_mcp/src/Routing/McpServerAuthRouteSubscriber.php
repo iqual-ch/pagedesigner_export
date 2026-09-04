@@ -17,6 +17,14 @@ use Symfony\Component\Routing\RouteCollection;
  * exclusively via OAuth 2.1 client_credentials Bearer tokens, so `oauth2`
  * must be on the list. Idempotent: safe alongside any other module doing
  * the same (icms_mcp ships the identical subscriber).
+ *
+ * Also keeps the endpoint out of the redirect module's route normalizer. On
+ * sites with language prefixes the normalizer answers `GET /mcp` with a 301 to
+ * `/de/mcp`; the streamable-HTTP MCP client treats that as a dropped event
+ * stream and reconnects every second, one loop per session — a migration
+ * ingest turned that into ~1000 requests a minute against the source site.
+ * A plain 405 on GET is what the client expects from a server without an
+ * event stream, and it stops asking.
  */
 final class McpServerAuthRouteSubscriber extends RouteSubscriberBase {
 
@@ -33,6 +41,7 @@ final class McpServerAuthRouteSubscriber extends RouteSubscriberBase {
       $auth[] = 'oauth2';
       $route->setOption('_auth', $auth);
     }
+    $route->setOption('_disable_route_normalizer', TRUE);
   }
 
 }
