@@ -9,6 +9,7 @@
 
 declare(strict_types=1);
 
+use Drupal\Core\File\FileSystemInterface;
 use Drupal\user\Entity\Role;
 use Drupal\user\Entity\User;
 
@@ -93,10 +94,15 @@ function pagedesigner_mcp_remove_service_account(): void {
 }
 
 /**
+ * Where the simple_oauth signing keys are generated (a stream URI, see below).
+ */
+const PAGEDESIGNER_MCP_KEY_DIR = 'private://simple_oauth';
+
+/**
  * Provision the OAuth 2.1 client_credentials client for the MCP tools.
  *
  * Owns the full chain so per-site setup stays "enable the module":
- * simple_oauth key pair OUTSIDE the webroot (never in git), a
+ * simple_oauth key pair under private:// (never served, never in git), a
  * `pagedesigner_mcp` scope with ROLE granularity, and a confidential
  * Consumer (client_credentials grant, 1h tokens) bound to the passwordless
  * service user.
@@ -110,14 +116,28 @@ function pagedesigner_mcp_remove_service_account(): void {
 function pagedesigner_mcp_ensure_oauth_client(): ?array {
   $etm = \Drupal::entityTypeManager();
 
-  // 1. Signing keys. Outside the webroot, sibling of the docroot.
+  // 1. Signing keys, in the private file system. That is the one location
+  // that is writable on every host (Upsun mount, DDEV, plain LAMP), never
+  // served, and never under git — `<project>/keys` was inside the repository
+  // and got committed. Stored as a stream URI so the exported
+  // simple_oauth.settings is valid in every environment; simple_oauth
+  // resolves it through the file system's realpath().
   $settings = \Drupal::configFactory()->getEditable('simple_oauth.settings');
   $public = (string) $settings->get('public_key');
   $private = (string) $settings->get('private_key');
   if ($public === '' || $private === '' || !is_file($public) || !is_file($private)) {
-    $dir = dirname(DRUPAL_ROOT) . '/keys';
-    if (!is_dir($dir)) {
-      mkdir($dir, 0750, TRUE);
+    $dir = PAGEDESIGNER_MCP_KEY_DIR;
+    $file_system = \Drupal::service('file_system');
+    if ($file_system->realpath('private://') === FALSE) {
+      // hook_requirements() blocks a fresh install before this point; the
+      // update-hook path has no such gate, so refuse here rather than
+      // generate the keys somewhere they do not belong.
+      throw new \RuntimeException(
+        "pagedesigner_mcp: no private file system is configured, so the OAuth signing keys have nowhere safe to live. Set \$settings['file_private_path'] to a writable directory outside the webroot and run this again."
+      );
+    }
+    if (!$file_system->prepareDirectory($dir, FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS)) {
+      throw new \RuntimeException("pagedesigner_mcp: could not create $dir for the OAuth signing keys.");
     }
     if (!is_file($dir . '/public.key') || !is_file($dir . '/private.key')) {
       \Drupal::service('simple_oauth.key.generator')->generateKeys($dir);

@@ -29,8 +29,11 @@ Therefore:
 
 Install (and `drush updb`, update 10101) provisions everything:
 
-1. simple_oauth **signing keys** outside the webroot (`../keys/`, never in
-   git) — skipped when the site already has keys.
+1. simple_oauth **signing keys** under `private://simple_oauth/` — the private
+   file system is never served and never in git, and the stream URI in
+   `simple_oauth.settings` is valid in every environment (DDEV, Upsun mount,
+   production). Skipped when the site already has keys. Install is refused
+   when no `file_private_path` is configured.
 2. A `pagedesigner_mcp` **scope** with ROLE granularity: tokens carry exactly
    the `pagedesigner_mcp` role's permissions.
 3. A **confidential consumer** (`client_id: pagedesigner_mcp`,
@@ -57,3 +60,18 @@ MCP endpoint: `POST /mcp` with `Authorization: Bearer <access_token>` from
 
 The legacy drupal/mcp plugin (`/mcp/post`, basic auth) keeps working on
 sites that still have `drupal/mcp` enabled — transition only.
+
+## Moving keys that were generated inside the project
+
+Earlier versions generated the pair at `<project>/keys/`, inside the
+repository. If a site still has them there (`drush cget simple_oauth.settings`),
+regenerate into the private file system — anything signed with the old pair
+stops validating, which is the point if they were ever committed:
+
+```bash
+drush simple-oauth:generate-keys private://simple_oauth
+drush cset simple_oauth.settings public_key private://simple_oauth/public.key -y
+drush cset simple_oauth.settings private_key private://simple_oauth/private.key -y
+drush cex -y
+rm -rf ../keys   # and purge them from git history if they were pushed
+```

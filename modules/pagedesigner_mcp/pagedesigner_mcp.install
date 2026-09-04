@@ -9,6 +9,25 @@
 declare(strict_types=1);
 
 /**
+ * Implements hook_requirements().
+ *
+ * The OAuth signing keys are generated under private://simple_oauth (see
+ * pagedesigner_mcp_ensure_oauth_client()). Without a private file system they
+ * would have to land inside the project, so the install is refused up front.
+ */
+function pagedesigner_mcp_requirements(string $phase): array {
+  $requirements = [];
+  if ($phase === 'install' && \Drupal::service('file_system')->realpath('private://') === FALSE) {
+    $requirements['pagedesigner_mcp_private_path'] = [
+      'title' => t('Pagedesigner MCP signing keys'),
+      'description' => t("No private file system is configured. Set \$settings['file_private_path'] to a writable directory outside the webroot (on Upsun: the private mount) — the OAuth signing keys are generated under private://simple_oauth."),
+      'severity' => REQUIREMENT_ERROR,
+    ];
+  }
+  return $requirements;
+}
+
+/**
  * Implements hook_install().
  */
 function pagedesigner_mcp_install(): void {
