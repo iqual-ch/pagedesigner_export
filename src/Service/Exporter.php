@@ -54,7 +54,10 @@ class Exporter {
   // exports, so target setup can create a counterpart field instead of guessing
   // its type from a sample value. Consumers check the MAJOR version only, so
   // older readers keep working.
-  public const MIGRATION_SCHEMA_VERSION = '0.5.0';
+  // 0.6.0 adds `users.json` (accounts + roles, so a migrated page can keep its
+  // author) and `pagedesigner_child_count` per page (so a consumer can tell a
+  // real composition from an empty one without fetching its tree).
+  public const MIGRATION_SCHEMA_VERSION = '0.6.0';
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -715,7 +718,54 @@ class Exporter {
       }
     }
 
+    $this->stampCompositionSize($pages);
+
     return $pages;
+  }
+
+  /**
+   * Stamp each page with how many elements its composition root holds.
+   *
+   * A bundle can carry a PageDesigner field and still have nothing in it: on
+   * the Trachtverein fleet every bundle has `field_pagedesigner_content`, and
+   * 879 of 945 roots are childless. The consumer fetches one tree per page, so
+   * without this it spends 879 round-trips discovering that those pages have
+   * no composition — and the node's own fields, which is all they actually
+   * carry, are already on this manifest entry.
+   *
+   * Deliberately the DIRECT child count, not a recursive element count: it is
+   * one field read per root rather than a tree walk, and zero children is the
+   * only claim a consumer may safely act on. Anything above zero is fetched as
+   * before.
+   */
+  protected function stampCompositionSize(array &$pages): void {
+    $rootIds = [];
+    foreach ($pages as $page) {
+      $rootId = (int) ($page['pagedesigner_root_id'] ?? 0);
+      if ($rootId) {
+        $rootIds[$rootId] = TRUE;
+      }
+    }
+    if (!$rootIds) {
+      return;
+    }
+
+    // One load for the whole site: per-page loads would trade the consumer's
+    // round-trips for our own.
+    $roots = $this->entityTypeManager->getStorage('pagedesigner_element')
+      ->loadMultiple(array_keys($rootIds));
+
+    foreach ($pages as &$page) {
+      $rootId = (int) ($page['pagedesigner_root_id'] ?? 0);
+      $root = $roots[$rootId] ?? NULL;
+      if ($root === NULL) {
+        continue;
+      }
+      $page['pagedesigner_child_count'] = $root->hasField('children')
+        ? $root->get('children')->count()
+        : 0;
+    }
+    unset($page);
   }
 
   /**
