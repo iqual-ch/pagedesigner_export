@@ -46,6 +46,9 @@ final class PagedesignerMcpOperations {
         case 'get_menus':
           return $this->exporter->exportMenus() + ['status' => 'ok'];
 
+        case 'get_users':
+          return $this->exporter->exportUsers() + ['status' => 'ok'];
+
         case 'get_entities':
           return $this->getEntities($arguments);
       }
@@ -75,9 +78,12 @@ final class PagedesignerMcpOperations {
       $pd_entity_ids[(string) ($page['entity_type'] ?? 'node') . ':' . (string) ($page['entity_id'] ?? '')] = TRUE;
     }
     $entities = $this->exporter->discoverPlainEntities($options, $pd_entity_ids);
+    $users = $this->exporter->exportUsers();
     $manifest['content'] = [
       'vocabulary_count' => count($taxonomies['vocabularies'] ?? []),
       'menu_count' => count($menus['menus'] ?? []),
+      'user_count' => count($users['users'] ?? []),
+      'role_count' => count($users['roles'] ?? []),
       'entities' => $entities,
     ];
     return $manifest + ['status' => 'ok'];

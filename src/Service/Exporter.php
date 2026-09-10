@@ -128,6 +128,10 @@ class Exporter {
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'taxonomies.json', $taxonomies);
     $menus = $this->exportMenus();
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'menus.json', $menus);
+    // Accounts and roles (schema 0.6.0): a page's owner travels as {uid, name},
+    // which the target cannot resolve on its own — it matches by e-mail.
+    $users = $this->exportUsers();
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'users.json', $users);
 
     $pd_entity_ids = [];
     foreach ($manifest['pages'] as $page) {
@@ -146,6 +150,9 @@ class Exporter {
       'vocabulary_count' => count($taxonomies['vocabularies'] ?? []),
       'menus_file' => 'menus.json',
       'menu_count' => count($menus['menus'] ?? []),
+      'users_file' => 'users.json',
+      'user_count' => count($users['users'] ?? []),
+      'role_count' => count($users['roles'] ?? []),
       'entities' => $entities,
     ];
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
@@ -196,6 +203,56 @@ class Exporter {
     }
 
     return ['vocabularies' => $vocabularies];
+  }
+
+  /**
+   * Export the accounts that own content, plus the site's roles.
+   *
+   * Per-node owners travel as `{uid, name}` on the page metadata: enough to
+   * say WHO wrote a page, not enough to recreate the account on the target,
+   * which matches an owner by e-mail. This is the list those uids resolve
+   * against.
+   *
+   * The anonymous user is skipped (uid 0 owns nothing worth migrating) and the
+   * implicit `authenticated` role is dropped from both lists — every account
+   * has it, so it is never a mapping decision.
+   */
+  public function exportUsers(): array {
+    if (!$this->entityTypeManager->hasDefinition('user')) {
+      return ['users' => [], 'roles' => []];
+    }
+
+    $roles = [];
+    if ($this->entityTypeManager->hasDefinition('user_role')) {
+      foreach ($this->entityTypeManager->getStorage('user_role')->loadMultiple() as $role) {
+        if (in_array($role->id(), ['anonymous', 'authenticated'], TRUE)) {
+          continue;
+        }
+        $roles[] = ['id' => $role->id(), 'label' => (string) $role->label()];
+      }
+    }
+
+    $users = [];
+    $user_storage = $this->entityTypeManager->getStorage('user');
+    $uids = $user_storage->getQuery()
+      ->accessCheck(FALSE)
+      ->condition('uid', 0, '>')
+      ->sort('uid')
+      ->execute();
+    foreach ($user_storage->loadMultiple($uids) as $account) {
+      /** @var \Drupal\user\UserInterface $account */
+      $users[] = [
+        'uid' => (int) $account->id(),
+        'uuid' => $account->uuid(),
+        'name' => $account->getAccountName(),
+        'mail' => (string) ($account->getEmail() ?? ''),
+        'status' => (bool) $account->isActive(),
+        'roles' => array_values(array_diff($account->getRoles(), ['authenticated'])),
+        'created' => (int) $account->getCreatedTime(),
+      ];
+    }
+
+    return ['users' => $users, 'roles' => $roles];
   }
 
   /**
