@@ -3,6 +3,7 @@
 namespace Drupal\pagedesigner_export\Service;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Database\Connection;
 use Drupal\Core\Entity\ContentEntityInterface;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityPublishedInterface;
@@ -45,6 +46,7 @@ class Exporter {
     protected FileUrlGeneratorInterface $fileUrlGenerator,
     protected ?ModuleHandlerInterface $moduleHandler = NULL,
     protected ?MenuLinkManagerInterface $menuLinkManager = NULL,
+    protected ?Connection $database = NULL,
   ) {}
 
   /**
@@ -57,7 +59,36 @@ class Exporter {
   // 0.6.0 adds `users.json` (accounts + roles, so a migrated page can keep its
   // author) and `pagedesigner_child_count` per page (so a consumer can tell a
   // real composition from an empty one without fetching its tree).
-  public const MIGRATION_SCHEMA_VERSION = '0.6.0';
+  // 0.7.0 adds `pagedesigner_content_count`: the same question asked properly,
+  // counting the CONTENT elements anywhere under the root rather than the
+  // root's direct children, so a page left holding empty rows reads as empty.
+  public const MIGRATION_SCHEMA_VERSION = '0.7.0';
+
+  /**
+   * Element bundles that hold no content of their own.
+   *
+   * Structure (`container`, `row`, `cell`, `layout`), the UI-patterns shell
+   * (`component` — its payload lives in its `content` children) and the
+   * presentation attachments (`style`, `class`, the responsive-image helpers).
+   * Everything else counts: `content`, `image`, `svg`, `link`, `document`,
+   * `audio`, `video`, `embed`, `gallery`, `block`, `webform`, …
+   *
+   * A DENY-list on purpose. A bundle a future `pagedesigner_*` sub-module ships
+   * counts as content until it is listed here, so an unknown element keeps its
+   * page in the reviewer's hands; an allow-list would silently classify that
+   * page as empty and skip it.
+   */
+  public const NON_CONTENT_ELEMENT_TYPES = [
+    'container',
+    'row',
+    'cell',
+    'component',
+    'layout',
+    'style',
+    'class',
+    'component_sizes',
+    'image_style_template',
+  ];
 
   /**
    * Build a migration manifest for source entities with pagedesigner roots.
@@ -733,10 +764,23 @@ class Exporter {
    * no composition — and the node's own fields, which is all they actually
    * carry, are already on this manifest entry.
    *
-   * Deliberately the DIRECT child count, not a recursive element count: it is
-   * one field read per root rather than a tree walk, and zero children is the
-   * only claim a consumer may safely act on. Anything above zero is fetched as
-   * before.
+   * Two figures, answering two different questions:
+   *
+   * - `pagedesigner_child_count` — the root's DIRECT children. One field read
+   *   per root, and enough to skip a tree fetch: a root with no children holds
+   *   nothing, always.
+   * - `pagedesigner_content_count` — the CONTENT elements anywhere under the
+   *   root. This is the one a consumer classifies on. Every node with the field
+   *   gets a root container whether or not anyone ever composed the page, and
+   *   an editor who adds a row and deletes its contents leaves a child behind
+   *   that carries nothing: on the direct count that page reads as composed,
+   *   and a reviewer gets a row for a page with nothing on it.
+   *
+   * The recursive figure is no more expensive than the direct one, because
+   * every descendant carries a denormalised root reference (`container`): one
+   * grouped count over the whole site, no tree walk. It is omitted entirely
+   * when the database is unavailable, and the consumer then falls back to the
+   * direct count exactly as it did before this existed.
    */
   protected function stampCompositionSize(array &$pages): void {
     $rootIds = [];
@@ -754,6 +798,7 @@ class Exporter {
     // round-trips for our own.
     $roots = $this->entityTypeManager->getStorage('pagedesigner_element')
       ->loadMultiple(array_keys($rootIds));
+    $contentCounts = $this->contentElementCounts(array_keys($rootIds));
 
     foreach ($pages as &$page) {
       $rootId = (int) ($page['pagedesigner_root_id'] ?? 0);
@@ -764,8 +809,77 @@ class Exporter {
       $page['pagedesigner_child_count'] = $root->hasField('children')
         ? $root->get('children')->count()
         : 0;
+      if ($contentCounts !== NULL) {
+        $page['pagedesigner_content_count'] = $contentCounts[$rootId] ?? 0;
+      }
     }
     unset($page);
+  }
+
+  /**
+   * Content elements under each root, keyed by root id.
+   *
+   * @param int[] $rootIds
+   *   The composition roots to count under.
+   *
+   * @return array<int,int>|null
+   *   Root id → content element count, or NULL when the count cannot be taken
+   *   (no database, or an element schema this query does not recognise). NULL
+   *   means "not measured" and must not be read as zero.
+   */
+  protected function contentElementCounts(array $rootIds): ?array {
+    if ($this->database === NULL || !$rootIds) {
+      return NULL;
+    }
+
+    $table = 'pagedesigner_element_field_data';
+    try {
+      $schema = $this->database->schema();
+      if (!$schema->tableExists($table)) {
+        return NULL;
+      }
+      // Without these two the question cannot be asked at all; the caller then
+      // falls back to the direct child count.
+      foreach (['id', 'container', 'type'] as $column) {
+        if (!$schema->fieldExists($table, $column)) {
+          return NULL;
+        }
+      }
+      $query = $this->database->select($table, 'e');
+      $query->addField('e', 'container', 'root_id');
+      // DISTINCT because the data table carries one row per translation and a
+      // translated element would otherwise count once per language.
+      $query->addExpression('COUNT(DISTINCT e.id)', 'total');
+      $query->condition('e.container', $rootIds, 'IN');
+      $query->condition('e.type', self::NON_CONTENT_ELEMENT_TYPES, 'NOT IN');
+      // Soft-deleted elements are not rendered, so they are not content — the
+      // same test the renderer applies. Skipped rather than fatal where the
+      // column does not exist: over-counting keeps a page in the reviewer's
+      // hands, which is the safe direction to be wrong in.
+      if ($schema->fieldExists($table, 'deleted')) {
+        $deleted = $query->orConditionGroup()
+          ->condition('e.deleted', 0)
+          ->isNull('e.deleted');
+        $query->condition($deleted);
+      }
+      $query->groupBy('e.container');
+
+      $counts = [];
+      foreach ($query->execute() as $row) {
+        $counts[(int) $row->root_id] = (int) $row->total;
+      }
+      return $counts;
+    }
+    catch (\Exception $error) {
+      // A schema that does not match (an older pagedesigner, a different
+      // storage backend) must not fail the manifest: the consumer degrades to
+      // the direct child count.
+      $this->loggerFactory->get('pagedesigner_export')->warning(
+        'Could not count composition content elements: @message',
+        ['@message' => $error->getMessage()],
+      );
+      return NULL;
+    }
   }
 
   /**

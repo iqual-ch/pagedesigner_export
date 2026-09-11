@@ -12,6 +12,7 @@ services:
       - '@file_url_generator'
       - '@module_handler'
       - '@plugin.manager.menu.link'
+      - '@database'
 
   pagedesigner_export.importer:
     class: Drupal\pagedesigner_export\Service\Importer
