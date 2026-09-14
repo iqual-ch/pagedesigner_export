@@ -15,6 +15,7 @@ use Drupal\Core\Extension\ThemeHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
+use Drupal\language\ConfigurableLanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\Core\Menu\MenuLinkManagerInterface;
 use Drupal\Component\Plugin\PluginManagerInterface;
@@ -56,6 +57,9 @@ class Exporter {
   /**
    * Export contract schema version.
    */
+  // 0.9.0 adds `webforms.json` (`content.webforms_file`): every webform's
+  // config verbatim plus its submissions, so a page's placed form and an
+  // event's lifted registration form can exist on the target.
   // 0.5.0 adds `field_definitions`: the declared schema of the fields an entity
   // exports, so target setup can create a counterpart field instead of guessing
   // its type from a sample value. Consumers check the MAJOR version only, so
@@ -70,7 +74,7 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.8.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.9.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -192,6 +196,11 @@ class Exporter {
     // vocabulary that gives the class tokens in the trees their meaning.
     $theme = $this->exportTheme();
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'theme.json', $theme);
+    // Webforms (schema 0.9.0): config verbatim plus submissions. A page places
+    // a form by id only, and a child entity names its registration form by id;
+    // without this sidecar neither can exist on the target.
+    $webforms = $this->exportWebforms();
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'webforms.json', $webforms);
 
     $pd_entity_ids = [];
     foreach ($manifest['pages'] as $page) {
@@ -214,6 +223,12 @@ class Exporter {
       'user_count' => count($users['users'] ?? []),
       'role_count' => count($users['roles'] ?? []),
       'theme_file' => 'theme.json',
+      'webforms_file' => 'webforms.json',
+      'webform_count' => count($webforms['webforms'] ?? []),
+      'webform_submission_count' => array_sum(array_map(
+        static fn (array $webform): int => (int) ($webform['submissionCount'] ?? 0),
+        $webforms['webforms'] ?? [],
+      )),
       'entities' => $entities,
     ];
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
@@ -471,6 +486,126 @@ class Exporter {
     }
 
     return ['users' => $users, 'roles' => $roles];
+  }
+
+  /**
+   * Export every webform with its config verbatim and its submissions.
+   *
+   * A webform is a config entity: elements (a YAML string), settings,
+   * handlers, access, third-party settings. The target recreates it from that
+   * array as-is — handlers included, recipient addresses and all — so nothing
+   * here is normalised. Config translations travel per language when the site
+   * has them. Submissions carry their data, timestamps, IP, draft state and
+   * the submitter as `uid` plus the account's e-mail (`mail`), which is what
+   * the target re-links the submitter by; the source entity a submission was
+   * made on (`entity_type`/`entity_id`) is exported for the record only — a
+   * source nid means nothing on the target.
+   *
+   * Example and template forms the webform module ships are skipped, as the
+   * Pagedesigner handler skips them. A site without the webform module answers
+   * `['webforms' => []]`, never an error.
+   *
+   * @param bool $withSubmissions
+   *   Whether to include submissions (the count is exported either way).
+   *
+   * @return array
+   *   `{webforms: [{id, uuid, label, status, langcode, config, configTranslations,
+   *   submissionCount, submissions}]}`.
+   */
+  public function exportWebforms(bool $withSubmissions = TRUE): array {
+    if (!$this->entityTypeManager->hasDefinition('webform')) {
+      return ['webforms' => []];
+    }
+    $webform_storage = $this->entityTypeManager->getStorage('webform');
+    $submission_storage = $this->entityTypeManager->hasDefinition('webform_submission')
+      ? $this->entityTypeManager->getStorage('webform_submission')
+      : NULL;
+    $user_storage = $this->entityTypeManager->hasDefinition('user')
+      ? $this->entityTypeManager->getStorage('user')
+      : NULL;
+    $languages = array_keys($this->languageManager->getLanguages());
+    $default_langcode = $this->languageManager->getDefaultLanguage()->getId();
+    $mail_by_uid = [];
+
+    $webforms = [];
+    foreach ($webform_storage->loadMultiple() as $webform_id => $webform) {
+      $webform_id = (string) $webform_id;
+      if (str_starts_with($webform_id, 'example_') || str_starts_with($webform_id, 'template_')) {
+        continue;
+      }
+      $config_name = 'webform.webform.' . $webform_id;
+      $config = $this->configFactory->get($config_name)->getRawData();
+      unset($config['_core']);
+
+      $translations = [];
+      if ($this->languageManager instanceof ConfigurableLanguageManagerInterface) {
+        foreach ($languages as $langcode) {
+          if ($langcode === $default_langcode) {
+            continue;
+          }
+          $override = $this->languageManager->getLanguageConfigOverride($langcode, $config_name)->get();
+          if (!empty($override)) {
+            $translations[$langcode] = $override;
+          }
+        }
+      }
+
+      $submission_ids = [];
+      if ($submission_storage !== NULL) {
+        $submission_ids = $submission_storage->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('webform_id', $webform_id)
+          ->sort('sid')
+          ->execute();
+      }
+      $submissions = [];
+      if ($withSubmissions && $submission_ids) {
+        foreach (array_chunk(array_values($submission_ids), 200) as $chunk) {
+          foreach ($submission_storage->loadMultiple($chunk) as $submission) {
+            /** @var \Drupal\webform\WebformSubmissionInterface $submission */
+            $uid = (int) $submission->getOwnerId();
+            if ($uid > 0 && !array_key_exists($uid, $mail_by_uid)) {
+              $account = $user_storage?->load($uid);
+              $mail_by_uid[$uid] = $account ? (string) ($account->getEmail() ?? '') : '';
+            }
+            $source_entity = $submission->getSourceEntity();
+            $submissions[] = [
+              'sid' => (int) $submission->id(),
+              'uuid' => $submission->uuid(),
+              'created' => (int) $submission->getCreatedTime(),
+              'completed' => (int) $submission->getCompletedTime(),
+              'changed' => (int) $submission->getChangedTime(),
+              'in_draft' => (bool) $submission->isDraft(),
+              'langcode' => $submission->language()->getId(),
+              'remote_addr' => (string) $submission->getRemoteAddr(),
+              'uid' => $uid,
+              'mail' => $uid > 0 ? ($mail_by_uid[$uid] ?? '') : '',
+              'entity_type' => $source_entity ? $source_entity->getEntityTypeId() : NULL,
+              'entity_id' => $source_entity ? (string) $source_entity->id() : NULL,
+              'sticky' => (bool) $submission->isSticky(),
+              'locked' => (bool) $submission->isLocked(),
+              'notes' => (string) $submission->getNotes(),
+              'data' => $submission->getData(),
+            ];
+          }
+          $submission_storage->resetCache($chunk);
+        }
+      }
+
+      $webforms[] = [
+        'id' => $webform_id,
+        'uuid' => $webform->uuid(),
+        'label' => (string) $webform->label(),
+        'status' => $webform->status(),
+        'langcode' => (string) ($config['langcode'] ?? $default_langcode),
+        'config' => $config,
+        'configTranslations' => $translations,
+        'submissionCount' => count($submission_ids),
+        'submissions' => $submissions,
+      ];
+    }
+
+    return ['webforms' => $webforms];
   }
 
   /**

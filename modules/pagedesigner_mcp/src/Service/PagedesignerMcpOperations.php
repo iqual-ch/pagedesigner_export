@@ -52,6 +52,9 @@ final class PagedesignerMcpOperations {
         case 'get_theme_settings':
           return $this->exporter->exportTheme() + ['status' => 'ok'];
 
+        case 'get_webforms':
+          return $this->exporter->exportWebforms((bool) ($arguments['include_submissions'] ?? TRUE)) + ['status' => 'ok'];
+
         case 'get_entities':
           return $this->getEntities($arguments);
       }
@@ -82,11 +85,13 @@ final class PagedesignerMcpOperations {
     }
     $entities = $this->exporter->discoverPlainEntities($options, $pd_entity_ids);
     $users = $this->exporter->exportUsers();
+    $webforms = $this->exporter->exportWebforms(FALSE);
     $manifest['content'] = [
       'vocabulary_count' => count($taxonomies['vocabularies'] ?? []),
       'menu_count' => count($menus['menus'] ?? []),
       'user_count' => count($users['users'] ?? []),
       'role_count' => count($users['roles'] ?? []),
+      'webform_count' => count($webforms['webforms'] ?? []),
       'entities' => $entities,
     ];
     return $manifest + ['status' => 'ok'];

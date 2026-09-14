@@ -36,6 +36,43 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
+## Schema `0.9.0` — webforms
+
+Additive. The package gains `webforms.json` (`content.webforms_file`, with
+`content.webform_count` / `content.webform_submission_count`); the MCP module exposes
+the same document as `get_webforms` (`include_submissions`, default true).
+
+```jsonc
+{
+  "webforms": [
+    {
+      "id": "kontakt", "uuid": "…", "label": "Kontaktformular", "status": true, "langcode": "de",
+      "config": { "id": "kontakt", "title": "Kontaktformular", "elements": "name:\n  '#type': textfield\n…",
+                  "settings": { … }, "handlers": { "email": { … } }, "access": { … }, … },
+      "configTranslations": { "fr": { "title": "Formulaire de contact", "elements": "…" } },
+      "submissionCount": 312,
+      "submissions": [
+        { "sid": 17, "uuid": "…", "created": 1700000000, "completed": 1700000010, "changed": 1700000010,
+          "in_draft": false, "langcode": "de", "remote_addr": "203.0.113.7",
+          "uid": 5, "mail": "j.doe@example.org", "entity_type": "node", "entity_id": "123",
+          "sticky": false, "locked": false, "notes": "", "data": { "name": "Jane", "message": "…" } }
+      ]
+    }
+  ]
+}
+```
+
+- `config` is the `webform.webform.<id>` config object **verbatim** (minus `_core`): the target
+  recreates the form from it as-is, handlers and recipients included. `configTranslations`
+  holds the `language.<lc>.webform.webform.<id>` overrides per non-default language.
+- A submission's `uid` is a source uid; `mail` is that account's e-mail, which is what the
+  target re-links the submitter by (anonymous when empty or unknown). `entity_type` /
+  `entity_id` name the source entity the form was submitted on — for the record only.
+- `example_*` and `template_*` forms are skipped. A site without the webform module answers
+  `{"webforms": []}`, never an error.
+- Pagedesigner places a form with a `webform` element: `type: "webform"`,
+  `fields.field_webform[0].target_id = "<id>"`.
+
 ## Schema `0.8.0` — the design as data
 
 Additive. The package gains `theme.json` (`content.theme_file`) and the manifest a

@@ -129,6 +129,21 @@ class PagedesignerMcp extends McpPluginBase implements ContainerFactoryPluginInt
         ],
       ),
       new Tool(
+        name: 'get_webforms',
+        description: 'Export every webform with its config verbatim (elements, settings, handlers, translations) and, by default, its submissions (data, timestamps, IP, draft state, submitter uid + e-mail). Same shape as webforms.json of the drush package. Webforms import AFTER users and before nodes on the target.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'include_submissions' => [
+              'type' => 'boolean',
+              'description' => 'Include the submissions (default true).',
+              'default' => TRUE,
+            ],
+          ],
+          'required' => [],
+        ],
+      ),
+      new Tool(
         name: 'get_entities',
         description: 'Export content entities WITHOUT Pagedesigner roots (news, FAQs, …): per-translation fields with media enrichment, one payload per entity. Same shape as the entities/*.json files of the drush package. Optionally filter by entity keys ("node:45").',
         inputSchema: [
@@ -161,7 +176,7 @@ class PagedesignerMcp extends McpPluginBase implements ContainerFactoryPluginInt
   public function executeTool(string $toolId, mixed $arguments): array {
     foreach ([
       'get_migration_manifest', 'get_page_tree', 'get_taxonomies',
-      'get_menus', 'get_users', 'get_theme_settings', 'get_entities',
+      'get_menus', 'get_users', 'get_theme_settings', 'get_webforms', 'get_entities',
     ] as $known) {
       if ($toolId === $known || $toolId === md5($known)) {
         return $this->jsonResponse($this->operations->execute($known, $arguments));
