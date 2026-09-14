@@ -13,6 +13,8 @@ services:
       - '@module_handler'
       - '@plugin.manager.menu.link'
       - '@database'
+      - '@theme_handler'
+      - '@?plugin.manager.ui_patterns'
 
   pagedesigner_export.importer:
     class: Drupal\pagedesigner_export\Service\Importer

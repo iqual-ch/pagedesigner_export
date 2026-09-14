@@ -36,6 +36,39 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
+## Schema `0.8.0` — the design as data
+
+Additive. The package gains `theme.json` (`content.theme_file`) and the manifest a
+`theme` summary (`{name, baseTheme, palette}`); the MCP module exposes the same
+document as `get_theme_settings`.
+
+```jsonc
+{
+  "theme":    { "name": "iq_custom", "baseTheme": "iq_barrio", "chain": ["iq_custom", "iq_barrio", "bootstrap_barrio"],
+                "settingsConfig": "iq_barrio.settings" },
+  "settings": { "color_primary": "#e12722", "h1_font_family": "Lato", "button_border_radius": "5", … },
+  "palette":  { "primary": "#e12722", "secondary": "#db5a42", "tertiary": "#15151f", "quaternary": "#a57f60",
+                "grey1": "#475e61", …, "grey5": "#eeeeee", "black": "#000000", "white": "#ffffff" },
+  "patterns": {
+    "rowoneone": {
+      "type": "row", "styles": true,
+      "classes":        { "fullwidth": { "label": "Full width", "description": "…", "responsive": true }, … },
+      "stylingOptions": { "background_color": { "label": "Background color",
+                                                "options": { "background-color-primary": "Primary color", … } }, … }
+    }, …
+  }
+}
+```
+
+- `settings` is `iq_barrio.settings` verbatim (scalars only). Every `*_color*` key
+  other than the palette holds a palette NAME; `palette` is how a consumer turns
+  `h1_color: tertiary` into `#15151f`.
+- `patterns` mirrors the `classes` / `styling_options` blocks of each Pagedesigner
+  `*.ui_patterns.yml`. `responsive: true` means the editor stores the class as
+  `<key>-<large|medium|small>`. This is what tells a consumer that `inverted` is a
+  variant, `fullwidth-small` a breakpoint flag and `background-color-grey5` a colour pick.
+- A site without iq_barrio or UI Patterns answers with empty layers, never an error.
+
 ## Existing Tree Export Compatibility
 
 Each `export_file` should keep the existing `pagedesigner_export` tree shape: `root_id`, `default_langcode`, `exported_at`, and `elements`.

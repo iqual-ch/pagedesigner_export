@@ -120,6 +120,15 @@ class PagedesignerMcp extends McpPluginBase implements ContainerFactoryPluginInt
         ],
       ),
       new Tool(
+        name: 'get_theme_settings',
+        description: 'Export the site design as data: the default theme chain, iq_barrio.settings verbatim, the resolved colour palette (name to hex) and, per Pagedesigner pattern, the toggleable classes and styling-option selects. Same shape as theme.json of the drush package.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => (object) [],
+          'required' => [],
+        ],
+      ),
+      new Tool(
         name: 'get_entities',
         description: 'Export content entities WITHOUT Pagedesigner roots (news, FAQs, …): per-translation fields with media enrichment, one payload per entity. Same shape as the entities/*.json files of the drush package. Optionally filter by entity keys ("node:45").',
         inputSchema: [
@@ -152,7 +161,7 @@ class PagedesignerMcp extends McpPluginBase implements ContainerFactoryPluginInt
   public function executeTool(string $toolId, mixed $arguments): array {
     foreach ([
       'get_migration_manifest', 'get_page_tree', 'get_taxonomies',
-      'get_menus', 'get_users', 'get_entities',
+      'get_menus', 'get_users', 'get_theme_settings', 'get_entities',
     ] as $known) {
       if ($toolId === $known || $toolId === md5($known)) {
         return $this->jsonResponse($this->operations->execute($known, $arguments));

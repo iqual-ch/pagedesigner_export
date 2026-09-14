@@ -49,6 +49,9 @@ final class PagedesignerMcpOperations {
         case 'get_users':
           return $this->exporter->exportUsers() + ['status' => 'ok'];
 
+        case 'get_theme_settings':
+          return $this->exporter->exportTheme() + ['status' => 'ok'];
+
         case 'get_entities':
           return $this->getEntities($arguments);
       }

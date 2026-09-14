@@ -11,11 +11,13 @@ use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityChangedInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Extension\ModuleHandlerInterface;
+use Drupal\Core\Extension\ThemeHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\Core\Menu\MenuLinkManagerInterface;
+use Drupal\Component\Plugin\PluginManagerInterface;
 use Drupal\path_alias\AliasManagerInterface;
 use Drupal\pagedesigner\Entity\Element;
 use Drupal\user\EntityOwnerInterface;
@@ -47,6 +49,8 @@ class Exporter {
     protected ?ModuleHandlerInterface $moduleHandler = NULL,
     protected ?MenuLinkManagerInterface $menuLinkManager = NULL,
     protected ?Connection $database = NULL,
+    protected ?ThemeHandlerInterface $themeHandler = NULL,
+    protected ?PluginManagerInterface $patternManager = NULL,
   ) {}
 
   /**
@@ -62,7 +66,24 @@ class Exporter {
   // 0.7.0 adds `pagedesigner_content_count`: the same question asked properly,
   // counting the CONTENT elements anywhere under the root rather than the
   // root's direct children, so a page left holding empty rows reads as empty.
-  public const MIGRATION_SCHEMA_VERSION = '0.7.0';
+  // 0.8.0 adds `theme.json` (and a `theme` summary on the manifest): the
+  // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
+  // and the per-pattern class / styling-option vocabulary — so a migration can
+  // carry the visual identity, not only the content.
+  public const MIGRATION_SCHEMA_VERSION = '0.8.0';
+
+  /**
+   * The `iq_barrio.settings` keys that hold literal colours.
+   *
+   * Every other `*_color*` key holds one of these NAMES (`primary`, `grey5`,
+   * `white`, …); the theme interpolates `$color-<name>` into its SCSS. The
+   * palette is therefore the only place a consumer can turn a name into a hex.
+   */
+  public const PALETTE_KEYS = [
+    'primary', 'secondary', 'tertiary', 'quaternary',
+    'grey1', 'grey2', 'grey3', 'grey4', 'grey5',
+    'black', 'white',
+  ];
 
   /**
    * Element bundles that hold no content of their own.
@@ -121,6 +142,7 @@ class Exporter {
         'module_version' => self::MIGRATION_SCHEMA_VERSION,
       ],
       'pages' => $this->discoverMigrationPages($entityTypeId, $options),
+      'theme' => $this->themeSummary(),
     ];
   }
 
@@ -166,6 +188,10 @@ class Exporter {
     // which the target cannot resolve on its own — it matches by e-mail.
     $users = $this->exportUsers();
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'users.json', $users);
+    // The design (schema 0.8.0): theme settings, palette and the pattern
+    // vocabulary that gives the class tokens in the trees their meaning.
+    $theme = $this->exportTheme();
+    $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'theme.json', $theme);
 
     $pd_entity_ids = [];
     foreach ($manifest['pages'] as $page) {
@@ -187,6 +213,7 @@ class Exporter {
       'users_file' => 'users.json',
       'user_count' => count($users['users'] ?? []),
       'role_count' => count($users['roles'] ?? []),
+      'theme_file' => 'theme.json',
       'entities' => $entities,
     ];
     $this->writeJsonFile($outputDirectory . DIRECTORY_SEPARATOR . 'manifest.json', $manifest);
@@ -196,6 +223,163 @@ class Exporter {
       'page_count' => count($manifest['pages']),
       'entity_count' => count($entities),
     ];
+  }
+
+  /**
+   * Export the site's design as data.
+   *
+   * Three layers, all read-only:
+   * - `theme`: the default theme and its base chain, and which config object
+   *   carries the design settings.
+   * - `settings`: `iq_barrio.settings` verbatim (strings, as the theme-settings
+   *   form saved them). The theme bakes these into compiled CSS at save time,
+   *   so the config is the only machine-readable copy of the design.
+   * - `palette`: the literal colours, keyed by the NAME the other settings use.
+   * - `patterns`: per UI pattern, the toggleable `classes` and the
+   *   `styling_options` selects. Without this a consumer sees a tree's
+   *   `field_classes` as opaque strings and cannot tell a variant (`inverted`)
+   *   from a breakpoint flag (`fullwidth-small`) or a colour pick.
+   *
+   * A site without iq_barrio (or without UI Patterns) still answers: the
+   * layers it lacks are empty, never an error, so the migration proceeds
+   * without a design profile instead of failing on it.
+   */
+  public function exportTheme(): array {
+    $chain = $this->themeChain();
+    $settingsConfig = in_array('iq_barrio', $chain, TRUE) || $chain === []
+      ? 'iq_barrio.settings'
+      : $chain[0] . '.settings';
+    $settings = $this->configFactory->get($settingsConfig)->get() ?: [];
+    if ($settings === [] && $settingsConfig !== 'iq_barrio.settings') {
+      $settingsConfig = 'iq_barrio.settings';
+      $settings = $this->configFactory->get($settingsConfig)->get() ?: [];
+    }
+    // Only scalars travel: nested Barrio region/feature arrays are layout
+    // chrome, not design, and they bloat the payload.
+    $settings = array_filter($settings, static fn ($value): bool => is_scalar($value) || $value === NULL);
+
+    return [
+      'theme' => [
+        'name' => $chain[0] ?? NULL,
+        'baseTheme' => $chain[1] ?? NULL,
+        'chain' => $chain,
+        'settingsConfig' => $settingsConfig,
+      ],
+      'settings' => $settings,
+      'palette' => $this->paletteFromSettings($settings),
+      'patterns' => $this->exportPatternVocabulary(),
+    ];
+  }
+
+  /**
+   * The manifest's one-line view of the design: enough to know it is there.
+   */
+  protected function themeSummary(): array {
+    $chain = $this->themeChain();
+    $settings = $this->configFactory->get('iq_barrio.settings')->get() ?: [];
+    return [
+      'name' => $chain[0] ?? NULL,
+      'baseTheme' => $chain[1] ?? NULL,
+      'palette' => $this->paletteFromSettings($settings),
+    ];
+  }
+
+  /**
+   * Default theme first, then each base theme in order.
+   */
+  protected function themeChain(): array {
+    $handler = $this->themeHandler ?? (\Drupal::hasService('theme_handler') ? \Drupal::service('theme_handler') : NULL);
+    if ($handler === NULL) {
+      return [];
+    }
+    $info = $handler->listInfo();
+    $chain = [];
+    $name = $handler->getDefault();
+    while ($name && isset($info[$name]) && !in_array($name, $chain, TRUE)) {
+      $chain[] = $name;
+      $name = $info[$name]->base_theme ?? NULL;
+    }
+    return $chain;
+  }
+
+  /**
+   * `{name: "#rrggbb"}` for every palette key that holds a colour.
+   */
+  protected function paletteFromSettings(array $settings): array {
+    $palette = [];
+    foreach (self::PALETTE_KEYS as $name) {
+      $raw = trim((string) ($settings['color_' . $name] ?? ''));
+      if ($raw === '') {
+        continue;
+      }
+      if (preg_match('/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i', $raw, $m)) {
+        $hex = strtolower($m[1]);
+        if (strlen($hex) === 3) {
+          $hex = $hex[0] . $hex[0] . $hex[1] . $hex[1] . $hex[2] . $hex[2];
+        }
+        $palette[$name] = '#' . $hex;
+      }
+      else {
+        // rgb()/named colours are legal CSS; pass them through untouched.
+        $palette[$name] = $raw;
+      }
+    }
+    return $palette;
+  }
+
+  /**
+   * Per Pagedesigner pattern: toggleable classes and styling-option selects.
+   *
+   * Reads the same `additional` keys the Pagedesigner editor reads
+   * (`PatternResource`), minus translation: `classes[key] = {label,
+   * description, responsive}` and `stylingOptions[key] = {label, options:
+   * {classValue: label}}`. `responsive: true` means the editor stores the
+   * class as `<key>-<large|medium|small>`.
+   */
+  protected function exportPatternVocabulary(): array {
+    $manager = $this->patternManager
+      ?? (\Drupal::hasService('plugin.manager.ui_patterns') ? \Drupal::service('plugin.manager.ui_patterns') : NULL);
+    if ($manager === NULL) {
+      return [];
+    }
+    $patterns = [];
+    foreach ($manager->getDefinitions() as $id => $definition) {
+      $additional = is_object($definition) && method_exists($definition, 'getAdditional')
+        ? (array) $definition->getAdditional()
+        : (array) $definition;
+      if (empty($additional['pagedesigner'])) {
+        continue;
+      }
+      $classes = [];
+      foreach ((array) ($additional['classes'] ?? []) as $key => $class) {
+        $class = is_array($class) ? $class : [];
+        $classes[(string) $key] = [
+          'label' => (string) ($class['label'] ?? $key),
+          'description' => (string) ($class['description'] ?? ''),
+          'responsive' => !empty($class['responsive']),
+        ];
+      }
+      $stylingOptions = [];
+      foreach ((array) ($additional['styling_options'] ?? []) as $key => $option) {
+        $option = is_array($option) ? $option : [];
+        $values = [];
+        foreach ((array) ($option['options'] ?? []) as $classValue => $label) {
+          $values[(string) $classValue] = (string) $label;
+        }
+        $stylingOptions[(string) $key] = [
+          'label' => (string) ($option['label'] ?? $key),
+          'options' => $values,
+        ];
+      }
+      $patterns[(string) $id] = [
+        'type' => (string) ($additional['type'] ?? ''),
+        'styles' => !empty($additional['styles']),
+        'classes' => $classes,
+        'stylingOptions' => $stylingOptions,
+      ];
+    }
+    ksort($patterns);
+    return $patterns;
   }
 
   /**
