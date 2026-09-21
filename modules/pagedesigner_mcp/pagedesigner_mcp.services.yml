@@ -1,0 +1,16 @@
+services:
+  pagedesigner_mcp.operations:
+    class: Drupal\pagedesigner_mcp\Service\PagedesignerMcpOperations
+    arguments:
+      - '@pagedesigner_export.exporter'
+      - '@language_manager'
+      - '@logger.channel.pagedesigner_mcp'
+
+  pagedesigner_mcp.mcp_server_auth_route_subscriber:
+    class: Drupal\pagedesigner_mcp\Routing\McpServerAuthRouteSubscriber
+    tags:
+      - { name: event_subscriber }
+
+  logger.channel.pagedesigner_mcp:
+    parent: logger.channel_base
+    arguments: ['pagedesigner_mcp']

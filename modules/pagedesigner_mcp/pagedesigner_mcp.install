@@ -1,0 +1,71 @@
+<?php
+
+/**
+ * @file
+ * Install/uninstall hooks: the MCP service account and OAuth client live and
+ * die with the module — enable for the migration window, uninstall after.
+ */
+
+declare(strict_types=1);
+
+/**
+ * Implements hook_requirements().
+ *
+ * The OAuth signing keys are generated under private://simple_oauth (see
+ * pagedesigner_mcp_ensure_oauth_client()). Without a private file system they
+ * would have to land inside the project, so the install is refused up front.
+ */
+function pagedesigner_mcp_requirements(string $phase): array {
+  $requirements = [];
+  if ($phase === 'install' && \Drupal::service('file_system')->realpath('private://') === FALSE) {
+    $requirements['pagedesigner_mcp_private_path'] = [
+      'title' => t('Pagedesigner MCP signing keys'),
+      'description' => t("No private file system is configured. Set \$settings['file_private_path'] to a writable directory outside the webroot (on Upsun: the private mount) — the OAuth signing keys are generated under private://simple_oauth."),
+      'severity' => REQUIREMENT_ERROR,
+    ];
+  }
+  return $requirements;
+}
+
+/**
+ * Implements hook_install().
+ */
+function pagedesigner_mcp_install(): void {
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('pagedesigner_mcp');
+  pagedesigner_mcp_ensure_service_account();
+  $credentials = pagedesigner_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
+    \Drupal::messenger()->addStatus(t(
+      'Created the Pagedesigner MCP OAuth client — client_id %id, client_secret %secret. Shown only this once: paste both into the cockpit connection form. Rotate with `drush pagedesigner-mcp:rotate-secret`. Export config (drush cex) so the consumer, scope, and role survive the next config import.',
+      ['%id' => $credentials['client_id'], '%secret' => $credentials['client_secret']],
+    ));
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function pagedesigner_mcp_uninstall(): void {
+  pagedesigner_mcp_remove_service_account();
+}
+
+/**
+ * Switch to mcp_server + OAuth 2.1: keys, scope, consumer, permissions.
+ */
+function pagedesigner_mcp_update_10101(): string {
+  \Drupal::service('module_installer')->install(['mcp_server', 'simple_oauth', 'consumers']);
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('pagedesigner_mcp');
+  pagedesigner_mcp_ensure_service_account();
+  $credentials = pagedesigner_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
+    return 'Created the Pagedesigner MCP OAuth client — client_id ' . $credentials['client_id']
+      . ', client_secret ' . $credentials['client_secret']
+      . ' — shown only this once: paste both into the cockpit connection form.'
+      . ' Rotate with drush pagedesigner-mcp:rotate-secret. Export config (drush cex).';
+  }
+  return 'OAuth client ensured; the consumer already existed (secret untouched).';
+}
