@@ -11,7 +11,7 @@ use Psr\Log\LoggerInterface;
 /**
  * Pagedesigner MCP operations — the source-side export business logic.
  *
- * Transport-agnostic: the mcp_server #[Tool] plugins (src/Plugin/Tool/) and
+ * Transport-agnostic: the mcp_server #[Tool] plugins (src/Plugin/mcp_server/Tool/) and
  * the legacy drupal/mcp plugin (src/Plugin/Mcp/, transition only) are thin
  * adapters over this service. execute() returns RAW result arrays — each
  * transport applies its own envelope.

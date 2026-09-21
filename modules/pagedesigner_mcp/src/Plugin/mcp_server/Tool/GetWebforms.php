@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\pagedesigner_mcp\Plugin\Tool;
+namespace Drupal\pagedesigner_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\pagedesigner_mcp\Service\PagedesignerMcpOperations;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
@@ -12,26 +12,25 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: get_page_tree — thin adapter over PagedesignerMcpOperations.
+ * MCP tool: get_webforms — thin adapter over PagedesignerMcpOperations.
  */
 #[Tool(
-  id: 'get_page_tree',
-  label: new TranslatableMarkup('Get page tree'),
-  description: new TranslatableMarkup('Export one Pagedesigner element tree (rows, cells, typed elements with field values, ALL translations, media enrichment with downloadable URLs) plus its content_hash for incremental sync. Same shape as a pages/*.json file of the drush package.'),
+  id: 'get_webforms',
+  label: new TranslatableMarkup('Get webforms and submissions'),
+  description: new TranslatableMarkup('Export every webform with its config verbatim (elements, settings, handlers, translations) and, by default, its submissions (data, timestamps, IP, draft state, submitter uid + e-mail). Same shape as webforms.json of the drush package. A Pagedesigner webform element places a form by id; the target imports the forms AFTER users (submitters are re-linked by e-mail) and before nodes.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'pagedesigner_root_id' => ['type' => 'integer', 'description' => 'The pagedesigner_root_id from a manifest page entry.'],
-      'langcode' => ['type' => 'string', 'description' => 'Base language of the tree; defaults to the page default_langcode from the manifest.'],
+      'include_submissions' => ['type' => 'boolean', 'description' => 'Include the submissions (default true). The submission count is exported either way.', 'default' => TRUE],
     ],
-    'required' => ['pagedesigner_root_id'],
+    'required' => [],
   ],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,
   openWorld: FALSE,
 )]
-final class GetPageTree extends ToolPluginBase {
+final class GetWebforms extends ToolPluginBase {
 
   protected PagedesignerMcpOperations $operations;
 
@@ -67,7 +66,7 @@ final class GetPageTree extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('get_page_tree', $arguments);
+    return $this->operations->execute('get_webforms', $arguments);
   }
 
 }

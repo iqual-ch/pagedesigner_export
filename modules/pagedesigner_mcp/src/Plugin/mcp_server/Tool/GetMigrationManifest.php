@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\pagedesigner_mcp\Plugin\Tool;
+namespace Drupal\pagedesigner_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\pagedesigner_mcp\Service\PagedesignerMcpOperations;
 use Drupal\Core\StringTranslation\TranslatableMarkup;

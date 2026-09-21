@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\pagedesigner_mcp\Plugin\Tool;
+namespace Drupal\pagedesigner_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\pagedesigner_mcp\Service\PagedesignerMcpOperations;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
@@ -12,25 +12,19 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: get_webforms — thin adapter over PagedesignerMcpOperations.
+ * MCP tool: get_menus — thin adapter over PagedesignerMcpOperations.
  */
 #[Tool(
-  id: 'get_webforms',
-  label: new TranslatableMarkup('Get webforms and submissions'),
-  description: new TranslatableMarkup('Export every webform with its config verbatim (elements, settings, handlers, translations) and, by default, its submissions (data, timestamps, IP, draft state, submitter uid + e-mail). Same shape as webforms.json of the drush package. A Pagedesigner webform element places a form by id; the target imports the forms AFTER users (submitters are re-linked by e-mail) and before nodes.'),
-  inputSchema: [
-    'type' => 'object',
-    'properties' => [
-      'include_submissions' => ['type' => 'boolean', 'description' => 'Include the submissions (default true). The submission count is exported either way.', 'default' => TRUE],
-    ],
-    'required' => [],
-  ],
+  id: 'get_menus',
+  label: new TranslatableMarkup('Get menus'),
+  description: new TranslatableMarkup('Export custom menus with their menu_link_content trees (uuids, per-language titles, uris, hierarchy). Same shape as menus.json of the drush package. Menus import AFTER nodes on the target.'),
+  inputSchema: ['type' => 'object', 'properties' => new \stdClass(), 'required' => []],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,
   openWorld: FALSE,
 )]
-final class GetWebforms extends ToolPluginBase {
+final class GetMenus extends ToolPluginBase {
 
   protected PagedesignerMcpOperations $operations;
 
@@ -66,7 +60,7 @@ final class GetWebforms extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('get_webforms', $arguments);
+    return $this->operations->execute('get_menus', $arguments);
   }
 
 }

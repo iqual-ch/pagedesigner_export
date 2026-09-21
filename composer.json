@@ -13,7 +13,7 @@
         "drupal/core": "^11",
         "drupal/pagedesigner": "^4.2",
         "drupal/mcp": "^1.2",
-        "drupal/mcp_server": "^2.0@beta",
+        "drupal/mcp_server": "^2.0.0-beta4",
         "drupal/simple_oauth": "^6.1",
         "drupal/consumers": "^1.24"
     }

@@ -16,7 +16,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 /**
  * Legacy drupal/mcp adapter over PagedesignerMcpOperations — transition only.
  *
- * The module's primary transport is drupal/mcp_server (src/Plugin/Tool/,
+ * The module's primary transport is drupal/mcp_server (src/Plugin/mcp_server/Tool/,
  * OAuth 2.1 Bearer). This plugin keeps the old /mcp/post endpoint working
  * while fleet sites migrate; it is removed together with the drupal/mcp
  * dependency once the transition window closes.

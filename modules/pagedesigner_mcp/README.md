@@ -58,6 +58,11 @@ drush cex -y
 MCP endpoint: `POST /mcp` with `Authorization: Bearer <access_token>` from
 `POST /oauth/token` (grant_type=client_credentials, scope=pagedesigner_mcp).
 
+mcp_server **2.0.0-beta4 or newer** is required: beta4 moved tool discovery
+from `src/Plugin/Tool/` to `src/Plugin/mcp_server/Tool/`, where this module's
+tools now live. On an older beta the site answers `/mcp` normally and
+advertises no tools at all.
+
 The legacy drupal/mcp plugin (`/mcp/post`, basic auth) keeps working on
 sites that still have `drupal/mcp` enabled — transition only.
 

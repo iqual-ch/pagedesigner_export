@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\pagedesigner_mcp\Plugin\Tool;
+namespace Drupal\pagedesigner_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\pagedesigner_mcp\Service\PagedesignerMcpOperations;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
@@ -12,19 +12,19 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: get_menus — thin adapter over PagedesignerMcpOperations.
+ * MCP tool: get_theme_settings — thin adapter over PagedesignerMcpOperations.
  */
 #[Tool(
-  id: 'get_menus',
-  label: new TranslatableMarkup('Get menus'),
-  description: new TranslatableMarkup('Export custom menus with their menu_link_content trees (uuids, per-language titles, uris, hierarchy). Same shape as menus.json of the drush package. Menus import AFTER nodes on the target.'),
+  id: 'get_theme_settings',
+  label: new TranslatableMarkup('Get theme settings'),
+  description: new TranslatableMarkup('Export the site design as data: the default theme chain, iq_barrio.settings verbatim, the resolved colour palette (name to hex) and, per Pagedesigner pattern, the toggleable classes and styling-option selects that give the class tokens in the page trees their meaning. Same shape as theme.json of the drush package. Empty layers, never an error, on a site without iq_barrio.'),
   inputSchema: ['type' => 'object', 'properties' => new \stdClass(), 'required' => []],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,
   openWorld: FALSE,
 )]
-final class GetMenus extends ToolPluginBase {
+final class GetThemeSettings extends ToolPluginBase {
 
   protected PagedesignerMcpOperations $operations;
 
@@ -60,7 +60,7 @@ final class GetMenus extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('get_menus', $arguments);
+    return $this->operations->execute('get_theme_settings', $arguments);
   }
 
 }
