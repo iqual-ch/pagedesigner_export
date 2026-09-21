@@ -59,7 +59,10 @@ class Exporter {
    */
   // 0.9.0 adds `webforms.json` (`content.webforms_file`): every webform's
   // config verbatim plus its submissions, so a page's placed form and an
-  // event's lifted registration form can exist on the target.
+  // event's lifted registration form can exist on the target. It also adds
+  // `description` to `field_definitions` — the field's editor-facing help
+  // text, so a reviewer mapping an unfamiliar site's fields reads what a
+  // field is FOR and not only what it is called.
   // 0.5.0 adds `field_definitions`: the declared schema of the fields an entity
   // exports, so target setup can create a counterpart field instead of guessing
   // its type from a sample value. Consumers check the MAJOR version only, so
@@ -828,9 +831,16 @@ class Exporter {
         // -1 means unlimited; the observed value count cannot reveal this.
         'cardinality' => (int) $definition->getFieldStorageDefinition()->getCardinality(),
         'label' => (string) $definition->getLabel(),
+        // The editor-facing help text. A label says what a field is called,
+        // this says what it is FOR — the one fact a reviewer mapping an
+        // unfamiliar site's fields cannot reconstruct from a sample value.
+        'description' => trim(strip_tags((string) $definition->getDescription())),
         'required' => (bool) $definition->isRequired(),
         'translatable' => (bool) $definition->isTranslatable(),
       ];
+      if ($info['description'] === '') {
+        unset($info['description']);
+      }
       if (!empty($settings['target_type'])) {
         $info['target_type'] = (string) $settings['target_type'];
       }
