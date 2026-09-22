@@ -36,6 +36,12 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
+## Schema `0.10.0` — vocabulary descriptions
+
+Additive. Each entry of `taxonomies.json` (and `get_taxonomies`) gains `machine_name`
+(same as `vid`, explicit) and `description` — the vocabulary's editor-facing help text,
+stripped of markup, `""` when unset.
+
 ## Schema `0.9.0` — webforms
 
 Additive. The package gains `webforms.json` (`content.webforms_file`, with

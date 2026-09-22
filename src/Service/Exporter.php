@@ -57,6 +57,9 @@ class Exporter {
   /**
    * Export contract schema version.
    */
+  // 0.10.0 adds `machine_name` and `description` to each vocabulary in
+  // `taxonomies.json` / `get_taxonomies`: the vocabulary gate shows a reviewer
+  // what a vocabulary is FOR beside its label.
   // 0.9.0 adds `webforms.json` (`content.webforms_file`): every webform's
   // config verbatim plus its submissions, so a page's placed form and an
   // event's lifted registration form can exist on the target. It also adds
@@ -77,7 +80,7 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.9.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.10.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -433,7 +436,12 @@ class Exporter {
       }
       $vocabularies[] = [
         'vid' => $vocabulary->id(),
+        'machine_name' => $vocabulary->id(),
         'label' => $vocabulary->label(),
+        // What the vocabulary is FOR, as its editors see it: the mapping gate
+        // shows it beside the label so a reviewer matching an unfamiliar
+        // site's vocabularies has more than a machine name to go on.
+        'description' => trim(strip_tags((string) ($vocabulary->getDescription() ?? ''))),
         'terms' => $terms,
       ];
     }
