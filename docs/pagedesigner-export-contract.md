@@ -36,6 +36,28 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
+## Schema `0.11.0` — the source's search setup
+
+`source.search` says what serves search on the source, so a consumer can tell a
+search results block from a content listing by configuration and a target plan
+can name the backend to provide:
+
+```json
+"search": {
+  "installed": true,
+  "backend_modules": ["search_api_solr"],
+  "servers": [{"id": "solr", "label": "Solr", "backend": "search_api_solr", "status": true}],
+  "indexes": [{"id": "content", "label": "Content", "server": "solr", "status": true,
+               "datasources": {"node": ["iq_blog_post", "page"]}}],
+  "views": [{"id": "search_api", "label": "Suche", "index": "content", "status": true,
+             "displays": ["default", "block_3", "block_4", "page_1"]}]
+}
+```
+
+`installed: false` with empty lists when Search API is absent. A placed block
+`views_block__<view id>_<display>` whose view id appears in `views[]` is a
+search results block whatever the view is called.
+
 ## Schema `0.10.0` — vocabulary descriptions
 
 Additive. Each entry of `taxonomies.json` (and `get_taxonomies`) gains `machine_name`

@@ -57,6 +57,11 @@ class Exporter {
   /**
    * Export contract schema version.
    */
+  // 0.11.0 adds `source.search`: whether Search API is installed, its servers
+  // with their backend (Solr, Elasticsearch, database), its indexes and the
+  // views built on them. A consumer can then tell a search results block from
+  // a content listing by configuration rather than by the view's name, and a
+  // target requirements plan can name the backend the target has to provide.
   // 0.10.0 adds `machine_name` and `description` to each vocabulary in
   // `taxonomies.json` / `get_taxonomies`: the vocabulary gate shows a reviewer
   // what a vocabulary is FOR beside its label.
@@ -80,7 +85,7 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.10.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.11.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -150,6 +155,7 @@ class Exporter {
         'drupal_version' => \Drupal::VERSION,
         'exported_at' => time(),
         'module_version' => self::MIGRATION_SCHEMA_VERSION,
+        'search' => $this->searchSummary(),
       ],
       'pages' => $this->discoverMigrationPages($entityTypeId, $options),
       'theme' => $this->themeSummary(),
@@ -1565,6 +1571,87 @@ class Exporter {
     }
 
     return $links;
+  }
+
+  /**
+   * The source site's search setup, for a consumer deciding the target's.
+   *
+   * Search results on a Pagedesigner page are a views block over a Search
+   * API index; the block id alone (`views_block__search_api_block_4`) does
+   * not say so reliably, and it never says which backend serves it. The
+   * servers' backend plugin ids (`search_api_solr`, `search_api_db`,
+   * `elasticsearch_connector`, …) are what a target has to reproduce or
+   * replace, so they travel in the manifest. Empty lists when Search API is
+   * not installed; any storage failure degrades to the same shape.
+   *
+   * @return array
+   *   {installed, backend_modules, servers[], indexes[], views[]}.
+   */
+  protected function searchSummary(): array {
+    $summary = [
+      'installed' => (bool) ($this->moduleHandler && $this->moduleHandler->moduleExists('search_api')),
+      'backend_modules' => [],
+      'servers' => [],
+      'indexes' => [],
+      'views' => [],
+    ];
+    if (!$summary['installed']) {
+      return $summary;
+    }
+    foreach (['search_api_solr', 'search_api_db', 'elasticsearch_connector', 'search_api_opensearch', 'search_api_algolia'] as $module) {
+      if ($this->moduleHandler->moduleExists($module)) {
+        $summary['backend_modules'][] = $module;
+      }
+    }
+    try {
+      if ($this->entityTypeManager->hasDefinition('search_api_server')) {
+        foreach ($this->entityTypeManager->getStorage('search_api_server')->loadMultiple() as $server) {
+          $summary['servers'][] = [
+            'id' => $server->id(),
+            'label' => (string) $server->label(),
+            'backend' => method_exists($server, 'getBackendId') ? (string) $server->getBackendId() : NULL,
+            'status' => (bool) $server->status(),
+          ];
+        }
+      }
+      if ($this->entityTypeManager->hasDefinition('search_api_index')) {
+        foreach ($this->entityTypeManager->getStorage('search_api_index')->loadMultiple() as $index) {
+          $datasources = [];
+          if (method_exists($index, 'getDatasources')) {
+            foreach ($index->getDatasources() as $datasource) {
+              $configuration = method_exists($datasource, 'getConfiguration') ? $datasource->getConfiguration() : [];
+              $datasources[$datasource->getEntityTypeId()] = array_values($configuration['bundles']['selected'] ?? []);
+            }
+          }
+          $summary['indexes'][] = [
+            'id' => $index->id(),
+            'label' => (string) $index->label(),
+            'server' => method_exists($index, 'getServerId') ? $index->getServerId() : NULL,
+            'status' => (bool) $index->status(),
+            'datasources' => $datasources,
+          ];
+        }
+      }
+      if ($this->entityTypeManager->hasDefinition('view')) {
+        foreach ($this->entityTypeManager->getStorage('view')->loadMultiple() as $view) {
+          $baseTable = (string) $view->get('base_table');
+          if (!str_starts_with($baseTable, 'search_api_index_')) {
+            continue;
+          }
+          $summary['views'][] = [
+            'id' => $view->id(),
+            'label' => (string) $view->label(),
+            'index' => substr($baseTable, strlen('search_api_index_')),
+            'status' => (bool) $view->status(),
+            'displays' => array_keys((array) $view->get('display')),
+          ];
+        }
+      }
+    }
+    catch (\Exception $e) {
+      $this->loggerFactory->get('pagedesigner_export')->warning('Search summary incomplete: @message', ['@message' => $e->getMessage()]);
+    }
+    return $summary;
   }
 
   /**
