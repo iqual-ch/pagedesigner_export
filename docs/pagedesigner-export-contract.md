@@ -36,6 +36,44 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
 
+## Schema `0.12.0` — the design's files
+
+Additive. `theme.json` (and `get_theme_settings`) gains `assets` and `customCss`; the
+manifest's `theme` summary gains `hasLogo`, `hasFavicon`, `iconCount`, `fontFaceCount`,
+`customCssBytes`. The settings said what the design *is*; these are the files it is
+made of — what a migration needs to rebuild the identity on the target (self-hosted
+faces, the icon set, the logo the site config takes, the favicon set) and what the
+theme's own stylesheet overrides beyond the settings (chrome, hover, shadows).
+
+```jsonc
+{
+  "assets": {
+    "logo":    { "url": "https://old.site/themes/custom/iq_custom/logo.svg", "path": "", "useDefault": true },
+    "favicon": { "url": "https://old.site/sites/default/files/favicon.ico", "path": "public://favicon.ico", "useDefault": false },
+    "icons":   [ { "name": "close", "path": "themes/custom/iq_custom/resources/img/close.svg",
+                   "url": "https://old.site/themes/custom/iq_custom/resources/img/close.svg", "bytes": 412 }, … ],
+    "fonts":   [ { "family": "Faro", "weight": "700", "style": "normal", "source": "self-hosted",
+                   "src": ["https://old.site/themes/custom/iq_custom/resources/fonts/FaroWeb-Bold.woff2", …] },
+                 { "family": "Open Sans", "weight": null, "style": null, "source": "google",
+                   "src": ["https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700"] } ]
+  },
+  "customCss": [ { "library": "iq_custom/global-styling", "path": "themes/custom/iq_custom/resources/css/custom.css",
+                   "url": "https://old.site/themes/custom/iq_custom/resources/css/custom.css", "bytes": 48213,
+                   "content": "body{…}" } ]
+}
+```
+
+- `logo` / `favicon` resolve the default theme's settings the way the theme does
+  (`theme_get_setting`): `useDefault: true` means the theme's own file.
+- `icons` are the SVGs under the default theme's `resources/img/` (also `images/`,
+  `img/`) and `patterns/`, at most 200.
+- `fonts` are the `@font-face` rules of the default theme's own stylesheets
+  (`source: "self-hosted"`, `src` absolute) plus the Google / Adobe font stylesheets
+  its libraries link (`source: "google" | "adobe-fonts"`, weight/style `null`).
+- `customCss` lists the default theme's own `css` library files; `content` is inlined
+  up to 256 KiB. Base themes are not included — their look is in the settings.
+- Empty lists / `null` when the theme has nothing, never an error.
+
 ## Schema `0.11.0` — the source's search setup
 
 `source.search` says what serves search on the source, so a consumer can tell a
