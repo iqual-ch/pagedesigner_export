@@ -57,6 +57,12 @@ class Exporter {
   /**
    * Export contract schema version.
    */
+  // 0.12.0 adds `assets` and `customCss` to `theme.json`: the logo and favicon
+  // the theme settings point at, the theme's own SVG icons, the `@font-face`
+  // rules of its compiled stylesheets with their files, and those stylesheets
+  // themselves (inline when small) — what a migration needs to rebuild the
+  // visual identity beyond the settings, and what the scalar filter used to
+  // drop (`logo.path`). The manifest's `theme` summary says whether they exist.
   // 0.11.0 adds `source.search`: whether Search API is installed, its servers
   // with their backend (Solr, Elasticsearch, database), its indexes and the
   // views built on them. A consumer can then tell a search results block from
@@ -85,7 +91,7 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.11.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.12.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -285,6 +291,7 @@ class Exporter {
     // chrome, not design, and they bloat the payload.
     $settings = array_filter($settings, static fn ($value): bool => is_scalar($value) || $value === NULL);
 
+    $custom_css = $this->themeStylesheets($chain[0] ?? '');
     return [
       'theme' => [
         'name' => $chain[0] ?? NULL,
@@ -295,7 +302,273 @@ class Exporter {
       'settings' => $settings,
       'palette' => $this->paletteFromSettings($settings),
       'patterns' => $this->exportPatternVocabulary(),
+      'assets' => $this->themeAssets($chain[0] ?? '', $custom_css),
+      'customCss' => $custom_css,
     ];
+  }
+
+  /**
+   * The design's files: logo, favicon, the theme's own icons, the font faces.
+   *
+   * `logo` / `favicon` come from the default theme's settings (`theme_get_setting`
+   * resolves `use_default`, the theme's `logo.svg` fallback and the file URI);
+   * `icons` are the SVGs under the theme's `resources/img/` and `patterns/`;
+   * `fonts` are the `@font-face` rules found in the theme's stylesheets
+   * (`$stylesheets`, see themeStylesheets()) plus the Google/Adobe font
+   * stylesheets its libraries link. Every URL is absolute. Empty lists when
+   * the theme has nothing, never an error.
+   */
+  protected function themeAssets(string $theme, array $stylesheets): array {
+    $assets = ['logo' => NULL, 'favicon' => NULL, 'icons' => [], 'fonts' => []];
+    if ($theme === '') {
+      return $assets;
+    }
+    foreach (['logo', 'favicon'] as $key) {
+      try {
+        $url = (string) (theme_get_setting($key . '.url', $theme) ?? '');
+        $path = (string) (theme_get_setting($key . '.path', $theme) ?? '');
+        $use_default = (bool) theme_get_setting($key . '.use_default', $theme);
+      }
+      catch (\Throwable) {
+        continue;
+      }
+      if ($url === '' && $path === '') {
+        continue;
+      }
+      $assets[$key] = [
+        'url' => $this->absoluteUrl($url !== '' ? $url : $path),
+        'path' => $path,
+        'useDefault' => $use_default,
+      ];
+    }
+    $theme_path = $this->themePath($theme);
+    if ($theme_path !== '') {
+      $root = rtrim(DRUPAL_ROOT, '/');
+      foreach (['resources/img', 'resources/images', 'images', 'img', 'patterns'] as $dir) {
+        $absolute = $root . '/' . $theme_path . '/' . $dir;
+        if (!is_dir($absolute)) {
+          continue;
+        }
+        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($absolute, \FilesystemIterator::SKIP_DOTS));
+        foreach ($iterator as $file) {
+          if (strtolower($file->getExtension()) !== 'svg' || count($assets['icons']) >= 200) {
+            continue;
+          }
+          $relative = $theme_path . '/' . $dir . '/' . str_replace($absolute . '/', '', $file->getPathname());
+          $relative = str_replace('\\', '/', $relative);
+          $assets['icons'][] = [
+            'name' => $file->getBasename('.svg'),
+            'path' => $relative,
+            'url' => $this->absoluteUrl('/' . $relative),
+            'bytes' => (int) $file->getSize(),
+          ];
+        }
+      }
+    }
+    foreach ($stylesheets as $sheet) {
+      $content = $sheet['content'] ?? NULL;
+      if ($content === NULL && !empty($sheet['path'])) {
+        $content = @file_get_contents(rtrim(DRUPAL_ROOT, '/') . '/' . $sheet['path']) ?: '';
+      }
+      foreach ($this->fontFacesIn((string) $content, (string) ($sheet['path'] ?? '')) as $face) {
+        $assets['fonts'][] = $face;
+      }
+    }
+    foreach ($this->externalFontStylesheets($theme) as $url) {
+      $assets['fonts'][] = [
+        'family' => $this->fontFamilyFromUrl($url),
+        'weight' => NULL,
+        'style' => NULL,
+        'src' => [$url],
+        'source' => str_contains($url, 'typekit') ? 'adobe-fonts' : 'google',
+      ];
+    }
+    return $assets;
+  }
+
+  /**
+   * The compiled stylesheets of the default theme's own libraries.
+   *
+   * Each `{library, path, url, bytes, content?}`; `content` is inlined below
+   * 256 KiB so a consumer can scan hover rules, shadows and transitions
+   * without fetching. Base themes' sheets are not included: their look is in
+   * the settings; the default theme's sheet is what overrides them.
+   */
+  protected function themeStylesheets(string $theme): array {
+    if ($theme === '' || !\Drupal::hasService('library.discovery')) {
+      return [];
+    }
+    try {
+      $libraries = \Drupal::service('library.discovery')->getLibrariesByExtension($theme);
+    }
+    catch (\Throwable) {
+      return [];
+    }
+    $sheets = [];
+    $root = rtrim(DRUPAL_ROOT, '/');
+    foreach ((array) $libraries as $library_name => $library) {
+      foreach ((array) ($library['css'] ?? []) as $css) {
+        if (($css['type'] ?? 'file') !== 'file' || empty($css['data'])) {
+          continue;
+        }
+        $path = ltrim((string) $css['data'], '/');
+        $absolute = $root . '/' . $path;
+        if (!is_file($absolute)) {
+          continue;
+        }
+        $bytes = (int) filesize($absolute);
+        $entry = [
+          'library' => $theme . '/' . $library_name,
+          'path' => $path,
+          'url' => $this->absoluteUrl('/' . $path),
+          'bytes' => $bytes,
+        ];
+        if ($bytes <= 262144) {
+          $entry['content'] = (string) @file_get_contents($absolute);
+        }
+        $sheets[] = $entry;
+      }
+    }
+    return $sheets;
+  }
+
+  /**
+   * External font stylesheets (Google Fonts, Adobe Fonts) the theme's
+   * libraries link.
+   */
+  protected function externalFontStylesheets(string $theme): array {
+    if (!\Drupal::hasService('library.discovery')) {
+      return [];
+    }
+    try {
+      $libraries = \Drupal::service('library.discovery')->getLibrariesByExtension($theme);
+    }
+    catch (\Throwable) {
+      return [];
+    }
+    $urls = [];
+    foreach ((array) $libraries as $library) {
+      foreach ((array) ($library['css'] ?? []) as $css) {
+        $data = (string) ($css['data'] ?? '');
+        if (($css['type'] ?? '') === 'external' && preg_match('#fonts\.googleapis\.com|use\.typekit\.net|fonts\.bunny\.net#', $data)) {
+          $urls[] = $data;
+        }
+      }
+    }
+    return array_values(array_unique($urls));
+  }
+
+  /**
+   * `@font-face` rules of a stylesheet: family, weight, style, absolute src URLs.
+   */
+  protected function fontFacesIn(string $css, string $css_path): array {
+    $faces = [];
+    if ($css === '' || !preg_match_all('/@font-face\s*\{([^}]*)\}/i', $css, $blocks)) {
+      return $faces;
+    }
+    $base_dir = $css_path !== '' ? dirname($css_path) : '';
+    foreach ($blocks[1] as $block) {
+      $face = ['family' => '', 'weight' => '400', 'style' => 'normal', 'src' => [], 'source' => 'self-hosted'];
+      if (preg_match('/font-family\s*:\s*([^;]+);/i', $block, $m)) {
+        $face['family'] = trim($m[1], " \t\n\r\0\x0B'\"");
+      }
+      if (preg_match('/font-weight\s*:\s*([^;]+);/i', $block, $m)) {
+        $face['weight'] = trim($m[1]);
+      }
+      if (preg_match('/font-style\s*:\s*([^;]+);/i', $block, $m)) {
+        $face['style'] = trim($m[1]);
+      }
+      if (preg_match_all('/url\(\s*([\'"]?)([^\'")]+)\1\s*\)/i', $block, $urls)) {
+        foreach ($urls[2] as $url) {
+          if (str_starts_with($url, 'data:')) {
+            continue;
+          }
+          $url = preg_replace('/[?#].*$/', '', $url);
+          if (preg_match('#^(https?:)?//#', $url)) {
+            $face['src'][] = $url;
+          }
+          elseif (str_starts_with($url, '/')) {
+            $face['src'][] = $this->absoluteUrl($url);
+          }
+          else {
+            $joined = $this->normalizePath(($base_dir !== '' ? $base_dir . '/' : '') . $url);
+            $face['src'][] = $this->absoluteUrl('/' . $joined);
+          }
+        }
+      }
+      if ($face['family'] !== '') {
+        $faces[] = $face;
+      }
+    }
+    return $faces;
+  }
+
+  /**
+   * The first `family=` of a Google Fonts URL, for the assets list.
+   */
+  protected function fontFamilyFromUrl(string $url): string {
+    if (preg_match('/family=([^&:]+)/', $url, $m)) {
+      return str_replace('+', ' ', urldecode($m[1]));
+    }
+    return '';
+  }
+
+  /**
+   * The default theme's path relative to DRUPAL_ROOT, '' when unknown.
+   */
+  protected function themePath(string $theme): string {
+    $handler = $this->themeHandler ?? (\Drupal::hasService('theme_handler') ? \Drupal::service('theme_handler') : NULL);
+    if ($handler === NULL) {
+      return '';
+    }
+    $info = $handler->listInfo();
+    if (!isset($info[$theme]) || !method_exists($info[$theme], 'getPath')) {
+      return '';
+    }
+    return trim((string) $info[$theme]->getPath(), '/');
+  }
+
+  /**
+   * `a/b/../c` → `a/c`.
+   */
+  protected function normalizePath(string $path): string {
+    $parts = [];
+    foreach (explode('/', $path) as $part) {
+      if ($part === '' || $part === '.') {
+        continue;
+      }
+      if ($part === '..') {
+        array_pop($parts);
+        continue;
+      }
+      $parts[] = $part;
+    }
+    return implode('/', $parts);
+  }
+
+  /**
+   * An absolute URL for a stream URI, a root-relative path or an already
+   * absolute URL.
+   */
+  protected function absoluteUrl(string $value): string {
+    if ($value === '' || preg_match('#^(https?:)?//#', $value)) {
+      return $value;
+    }
+    if (str_contains($value, '://')) {
+      try {
+        return $this->fileUrlGenerator->generateAbsoluteString($value);
+      }
+      catch (\Throwable) {
+        return $value;
+      }
+    }
+    try {
+      $host = \Drupal::request()->getSchemeAndHttpHost();
+    }
+    catch (\Throwable) {
+      $host = '';
+    }
+    return $host . '/' . ltrim($value, '/');
   }
 
   /**
@@ -304,10 +577,17 @@ class Exporter {
   protected function themeSummary(): array {
     $chain = $this->themeChain();
     $settings = $this->configFactory->get('iq_barrio.settings')->get() ?: [];
+    $stylesheets = $this->themeStylesheets($chain[0] ?? '');
+    $assets = $this->themeAssets($chain[0] ?? '', $stylesheets);
     return [
       'name' => $chain[0] ?? NULL,
       'baseTheme' => $chain[1] ?? NULL,
       'palette' => $this->paletteFromSettings($settings),
+      'hasLogo' => !empty($assets['logo']),
+      'hasFavicon' => !empty($assets['favicon']),
+      'iconCount' => count($assets['icons']),
+      'fontFaceCount' => count($assets['fonts']),
+      'customCssBytes' => array_sum(array_map(static fn (array $s): int => (int) ($s['bytes'] ?? 0), $stylesheets)),
     ];
   }
 
