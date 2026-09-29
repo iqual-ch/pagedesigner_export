@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.2.0` (additive over `0.1.0`).
+Current schema version: `0.13.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,27 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.13.0` — the configured front page, served paths
+
+Additive. The manifest's `source` block gains `front_page`: the node the site
+serves at `/` (`system.site page.front`), resolved to the entity it routes to:
+
+```jsonc
+"source": {
+  "front_page": { "path": "/node/1", "entity_type": "node", "entity_id": 1 }
+}
+```
+
+`null` when nothing is configured. A consumer that marks the front page by URL
+shape (`/` or `/<lang>`) never found an aliased front page and mistook any
+alias-less node for it; the configuration is the fact.
+
+Page `paths` are now the URL each language is **served** under — language
+prefix included on a prefixed site (`/en/homepage`), exactly what the site's
+own links carry. Before, a prefixed site exported bare aliases that never
+matched its own `href`s. Consumers that strip a language prefix keep working;
+the bare alias is still emitted when the URL generator is unavailable.
 
 ## Schema `0.12.0` — the design's files
 

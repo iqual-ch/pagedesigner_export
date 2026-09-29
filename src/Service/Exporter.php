@@ -17,6 +17,7 @@ use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\language\ConfigurableLanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\Core\Url;
 use Drupal\Core\Menu\MenuLinkManagerInterface;
 use Drupal\Component\Plugin\PluginManagerInterface;
 use Drupal\path_alias\AliasManagerInterface;
@@ -57,6 +58,13 @@ class Exporter {
   /**
    * Export contract schema version.
    */
+  // 0.13.0 adds `source.front_page` — the node `system.site page.front` serves
+  // at `/`, resolved to `{path, entity_type, entity_id}` — so a consumer knows
+  // the front page from configuration rather than from a URL shape (an
+  // aliased front page never sits at `/`). Page `paths` are now the URL each
+  // language is SERVED under (language prefix included, `/en/homepage`), the
+  // same path a link on the site carries; before, a prefixed site exported
+  // bare aliases that never matched its own links.
   // 0.12.0 adds `assets` and `customCss` to `theme.json`: the logo and favicon
   // the theme settings point at, the theme's own SVG icons, the `@font-face`
   // rules of its compiled stylesheets with their files, and those stylesheets
@@ -91,7 +99,7 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.12.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.13.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -162,6 +170,7 @@ class Exporter {
         'exported_at' => time(),
         'module_version' => self::MIGRATION_SCHEMA_VERSION,
         'search' => $this->searchSummary(),
+        'front_page' => $this->frontPageSummary(),
       ],
       'pages' => $this->discoverMigrationPages($entityTypeId, $options),
       'theme' => $this->themeSummary(),
@@ -2003,6 +2012,46 @@ class Exporter {
   }
 
   /**
+   * The site's configured front page (`system.site page.front`).
+   *
+   * @return array|null
+   *   `{path, entity_type, entity_id}` — the configured path (an alias is
+   *   resolved to its system path) and the entity it routes to when it is a
+   *   content entity's canonical route; NULL when nothing is configured.
+   */
+  protected function frontPageSummary(): ?array {
+    $configured = (string) ($this->configFactory->get('system.site')->get('page.front') ?? '');
+    if ($configured === '' || $configured === '/node') {
+      return NULL;
+    }
+    $path = $configured;
+    try {
+      $path = $this->aliasManager->getPathByAlias($configured, $this->languageManager->getDefaultLanguage()->getId());
+    }
+    catch (\Throwable) {
+      // Keep the configured value.
+    }
+    $summary = ['path' => $path, 'entity_type' => NULL, 'entity_id' => NULL];
+    if (preg_match('#^/([a-z_]+)/(\d+)$#', $path, $m)) {
+      $summary['entity_type'] = $m[1];
+      $summary['entity_id'] = (int) $m[2];
+      return $summary;
+    }
+    try {
+      $url = Url::fromUserInput($path);
+      if ($url->isRouted() && preg_match('/^entity\.([a-z_]+)\.canonical$/', $url->getRouteName(), $m)) {
+        $parameters = $url->getRouteParameters();
+        $summary['entity_type'] = $m[1];
+        $summary['entity_id'] = isset($parameters[$m[1]]) && is_numeric($parameters[$m[1]]) ? (int) $parameters[$m[1]] : $parameters[$m[1]] ?? NULL;
+      }
+    }
+    catch (\Throwable) {
+      // A route that is not an entity's canonical page: the path alone.
+    }
+    return $summary;
+  }
+
+  /**
    * Get a source entity path/alias for a language.
    *
    * @param \Drupal\Core\Entity\ContentEntityInterface $entity
@@ -2015,6 +2064,23 @@ class Exporter {
    */
   protected function getEntityPath(ContentEntityInterface $entity, string $langcode): ?string {
     if ($entity->getEntityTypeId() === 'node') {
+      // The path the language is served under — prefix included on a
+      // prefixed site — so it equals what the site's own links carry and a
+      // consumer needs no knowledge of the negotiation setup. The bare alias
+      // stays the fallback when the URL generator is not available.
+      try {
+        $language = $this->languageManager->getLanguage($langcode);
+        if ($language !== NULL) {
+          $url = Url::fromRoute('entity.node.canonical', ['node' => $entity->id()], ['language' => $language]);
+          $served = $url->toString();
+          if (is_string($served) && $served !== '') {
+            return $served;
+          }
+        }
+      }
+      catch (\Throwable) {
+        // Fall back to the alias below.
+      }
       return $this->aliasManager->getAliasByPath('/node/' . $entity->id(), $langcode);
     }
 
