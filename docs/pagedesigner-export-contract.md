@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.13.0` (every version additive; consumers check the major only).
+Current schema version: `0.14.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,31 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.14.0` — the site's hosts, non-file media values
+
+Additive. The manifest's `source` block gains `hosts`: every host the site is
+known to answer to, request host first — the export request's host, the
+literal entries of `trusted_host_patterns` (a pattern with regex syntax is
+skipped, never guessed) and the base URL a sitemap module (`simple_sitemap`,
+`xmlsitemap`) is configured to publish:
+
+```jsonc
+"source": {
+  "base_url": "https://preview.example.com",
+  "hosts": ["preview.example.com", "www.example.com"]
+}
+```
+
+An export taken on a preview environment carries the preview host in
+`base_url`, while editors link the live domain; a consumer treats every listed
+host as the same site. The list can still miss a host the site never
+configures, so a consumer may add hosts it infers from content.
+
+A referenced media entity (`referenced_entity`) gains `source_value` when its
+source field is not a file: an oEmbed video's URL, a remote embed's code.
+`null` for file-backed media. Such a media's only file is Drupal's generated
+`thumbnail`; the value is what the media is.
 
 ## Schema `0.13.0` — the configured front page, served paths
 

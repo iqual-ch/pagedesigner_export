@@ -17,6 +17,7 @@ use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\language\ConfigurableLanguageManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\Core\Site\Settings;
 use Drupal\Core\Url;
 use Drupal\Core\Menu\MenuLinkManagerInterface;
 use Drupal\Component\Plugin\PluginManagerInterface;
@@ -99,7 +100,15 @@ class Exporter {
   // site's design as data — `iq_barrio.settings` verbatim, the resolved palette
   // and the per-pattern class / styling-option vocabulary — so a migration can
   // carry the visual identity, not only the content.
-  public const MIGRATION_SCHEMA_VERSION = '0.13.0';
+  // 0.14.0 adds `source.hosts` — every host the site is known to answer to
+  // (the export request's host, literal `trusted_host_patterns`, a sitemap
+  // module's configured base URL) — because an export taken on a preview
+  // environment carries the preview host in `base_url` while editors link the
+  // live domain; a consumer treats every listed host as same-site. It also
+  // adds `source_value` to a referenced media entity whose source is not a
+  // file (an oEmbed video's URL, a remote embed's code): the media IS that
+  // value, and its only file is the generated thumbnail.
+  public const MIGRATION_SCHEMA_VERSION = '0.14.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -165,6 +174,7 @@ class Exporter {
         'site_name' => $siteConfig->get('name') ?: NULL,
         'site_uuid' => $siteConfig->get('uuid') ?: NULL,
         'base_url' => $this->getBaseUrl(),
+        'hosts' => $this->siteHosts(),
         'default_langcode' => $this->languageManager->getDefaultLanguage()->getId(),
         'drupal_version' => \Drupal::VERSION,
         'exported_at' => time(),
@@ -2097,6 +2107,59 @@ class Exporter {
   }
 
   /**
+   * Every host the site is known to answer to, request host first.
+   *
+   * An export is often taken on a preview environment whose host is not the
+   * one editors link to. The configured sources of the site's own host names
+   * are read: the request host, `trusted_host_patterns` entries that are a
+   * literal host (a pattern with real regex syntax is skipped rather than
+   * guessed), and the base URL a sitemap module is configured to publish.
+   *
+   * @return string[]
+   *   Lower-case host names, de-duplicated, request host first.
+   */
+  protected function siteHosts(): array {
+    $hosts = [];
+    $add = static function (?string $value) use (&$hosts): void {
+      $value = strtolower(trim((string) $value));
+      if ($value === '') {
+        return;
+      }
+      $host = str_contains($value, '://') ? (string) parse_url($value, PHP_URL_HOST) : $value;
+      $host = trim($host, '.');
+      if ($host !== '' && preg_match('/^[a-z0-9.-]+$/', $host) && !in_array($host, $hosts, TRUE)) {
+        $hosts[] = $host;
+      }
+    };
+    $add($this->getBaseUrl());
+    foreach ((array) Settings::get('trusted_host_patterns', []) as $pattern) {
+      $literal = $this->literalHostFromPattern((string) $pattern);
+      if ($literal !== NULL) {
+        $add($literal);
+      }
+    }
+    foreach (['simple_sitemap.settings', 'xmlsitemap.settings'] as $configName) {
+      $add((string) ($this->configFactory->get($configName)->get('base_url') ?? ''));
+    }
+    return $hosts;
+  }
+
+  /**
+   * The host a `trusted_host_patterns` entry names, when it names one.
+   *
+   * @param string $pattern
+   *   A pattern such as `^www\.example\.com$`.
+   *
+   * @return string|null
+   *   The literal host, or NULL for a pattern with real regex syntax.
+   */
+  protected function literalHostFromPattern(string $pattern): ?string {
+    $body = preg_replace('/^\^|\$$/', '', trim($pattern));
+    $body = str_replace('\\.', '.', (string) $body);
+    return preg_match('/^[A-Za-z0-9.-]+$/', $body) ? $body : NULL;
+  }
+
+  /**
    * Get the current request base URL when available.
    *
    * @return string|null
@@ -2397,6 +2460,7 @@ class Exporter {
       // generated preview — can precede the media's real payload. Naming the
       // source field lets a consumer pick the file the media actually is.
       'source_field' => $this->getMediaSourceFieldName($media),
+      'source_value' => $this->getMediaSourceValue($media),
       'files' => $files,
     ];
   }
@@ -2429,6 +2493,31 @@ class Exporter {
       }
     }
     return $files[0];
+  }
+
+  /**
+   * The value a non-file media source holds (an oEmbed URL, embed code).
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $media
+   *   The media entity.
+   *
+   * @return string|null
+   *   The source field's main value when that field is not a file or image
+   *   field; NULL for file-backed media or when it cannot be resolved.
+   */
+  protected function getMediaSourceValue(ContentEntityInterface $media): ?string {
+    $sourceField = $this->getMediaSourceFieldName($media);
+    if ($sourceField === '' || !$media->hasField($sourceField) || $media->get($sourceField)->isEmpty()) {
+      return NULL;
+    }
+    $definition = $media->get($sourceField)->getFieldDefinition();
+    if (in_array($definition->getType(), ['image', 'file'], TRUE) || (string) $definition->getSetting('target_type') === 'file') {
+      return NULL;
+    }
+    $item = $media->get($sourceField)->first();
+    $property = $item ? $item->mainPropertyName() : NULL;
+    $value = ($item && $property) ? $item->get($property)->getValue() : NULL;
+    return is_scalar($value) && trim((string) $value) !== '' ? trim((string) $value) : NULL;
   }
 
   /**
