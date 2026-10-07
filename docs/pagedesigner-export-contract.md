@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.14.0` (every version additive; consumers check the major only).
+Current schema version: `0.15.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,30 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.15.0` — elements referenced outside the children tree
+
+Additive. A page's tree export now also holds every element an exported
+element references through a `pagedesigner_element` reference field other
+than `children` / `container` / `parent` (before: only `field_styles`).
+
+The case that needed it is the gallery. A `gallery` element's images do not
+sit in its `children`: `field_gallery` references a `gallery_gallery` element
+whose `children` are `gallery_item` elements, each with `field_media` (the
+image, enriched with `referenced_entity` like any media reference) and
+`field_content` (the alt text):
+
+```jsonc
+"64520": { "de": { "type": "gallery", "fields": { "field_gallery": [{ "target_id": "64521" }] } } },
+"64521": { "de": { "type": "gallery_gallery", "children": [{ "target_id": "64522" }, …] } },
+"64522": { "de": { "type": "gallery_item", "parent": "64521",
+                   "fields": { "field_media": [{ "target_id": "812", "referenced_entity": { … } }],
+                               "field_content": [{ "value": "Alt text" }] } } }
+```
+
+Exports before `0.15.0` list `field_gallery` with a target that is not in
+`elements`: such a gallery has lost its images, and a consumer should say so
+rather than migrate an empty gallery.
 
 ## Schema `0.14.0` — the site's hosts, non-file media values
 

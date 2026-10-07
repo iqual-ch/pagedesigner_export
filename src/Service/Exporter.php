@@ -108,7 +108,12 @@ class Exporter {
   // adds `source_value` to a referenced media entity whose source is not a
   // file (an oEmbed video's URL, a remote embed's code): the media IS that
   // value, and its only file is the generated thumbnail.
-  public const MIGRATION_SCHEMA_VERSION = '0.14.0';
+  // 0.15.0 exports the elements an element references outside its children
+  // tree (every `pagedesigner_element` reference field, not only
+  // `field_styles`): a gallery's `field_gallery` → `gallery_gallery` element
+  // → `gallery_item` children with their `field_media`. Before, every
+  // gallery was exported without its images.
+  public const MIGRATION_SCHEMA_VERSION = '0.15.0';
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -2326,13 +2331,23 @@ class Exporter {
       }
     }
 
-    // Also collect style references.
-    if ($element->hasField('field_styles')) {
-      foreach ($element->get('field_styles') as $styleRef) {
-        if (!$styleRef->entity) {
+    // Also collect every other element an element references: its styles
+    // (`field_styles`) and the elements that hold its payload outside the
+    // children tree — a gallery's `field_gallery` points at a
+    // `gallery_gallery` element whose `gallery_item` children carry the
+    // images. Missing these exports a gallery without a single picture.
+    // `container` and `parent` point back up the tree and are not followed.
+    foreach ($element->getFieldDefinitions() as $fieldName => $definition) {
+      if (in_array($fieldName, ['children', 'container', 'parent'], TRUE)
+        || $definition->getType() !== 'entity_reference'
+        || $definition->getSetting('target_type') !== 'pagedesigner_element') {
+        continue;
+      }
+      foreach ($element->get($fieldName) as $reference) {
+        if (!$reference->entity) {
           continue;
         }
-        $ids = array_merge($ids, $this->collectElementIds($styleRef->entity, $langcode, $visited));
+        $ids = array_merge($ids, $this->collectElementIds($reference->entity, $langcode, $visited));
       }
     }
 
