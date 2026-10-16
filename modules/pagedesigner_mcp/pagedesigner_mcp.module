@@ -37,9 +37,15 @@ function pagedesigner_mcp_ensure_service_account(): void {
     ]);
   }
   // `access mcp server` gates the mcp_server endpoint (primary transport);
+  // `use pagedesigner_mcp tools` is our own gate.
+  $permissions = ['access mcp server', 'use pagedesigner_mcp tools'];
   // `use mcp server` keeps the legacy drupal/mcp endpoint working during
-  // the transition window; `use pagedesigner_mcp tools` is our own gate.
-  foreach (['access mcp server', 'use mcp server', 'use pagedesigner_mcp tools'] as $permission) {
+  // the transition window. Only grant it while that module is enabled:
+  // saving a role with an undefined permission drops it and logs an error.
+  if (\Drupal::moduleHandler()->moduleExists('mcp')) {
+    $permissions[] = 'use mcp server';
+  }
+  foreach ($permissions as $permission) {
     $role->grantPermission($permission);
   }
   $role->save();
