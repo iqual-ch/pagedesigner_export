@@ -63,9 +63,6 @@ from `src/Plugin/Tool/` to `src/Plugin/mcp_server/Tool/`, where this module's
 tools now live. On an older beta the site answers `/mcp` normally and
 advertises no tools at all.
 
-The legacy drupal/mcp plugin (`/mcp/post`, basic auth) keeps working on
-sites that still have `drupal/mcp` enabled — transition only.
-
 ## Moving keys that were generated inside the project
 
 Earlier versions generated the pair at `<project>/keys/`, inside the
