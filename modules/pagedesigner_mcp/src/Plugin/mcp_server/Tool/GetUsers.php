@@ -17,8 +17,15 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'get_users',
   label: new TranslatableMarkup('Get users and roles'),
-  description: new TranslatableMarkup('Export the site accounts (uid, uuid, name, mail, status, roles, created) and its roles (id, label). Same shape as users.json of the drush package. A page carries its owner as {uid, name} only; the target matches an owner by e-mail, so it resolves those uids against this list. Users import BEFORE nodes on the target.'),
-  inputSchema: ['type' => 'object', 'properties' => new \stdClass(), 'required' => []],
+  description: new TranslatableMarkup('Export the site accounts (uid, uuid, name, mail, status, roles, created) and its roles (id, label). Same shape as users.json of the drush package. A page carries its owner as {uid, name} only; the target matches an owner by e-mail, so it resolves those uids against this list. Users import BEFORE nodes on the target. Pass `limit` to page by uid (with `after_uid` = the previous page\'s `paging.next_after_uid`); without it every account comes in one response.'),
+  inputSchema: [
+    'type' => 'object',
+    'properties' => [
+      'limit' => ['type' => 'integer', 'description' => 'Optional page size. With it the result carries `paging: {after_uid, next_after_uid, total}`; `next_after_uid` is null on the last page.'],
+      'after_uid' => ['type' => 'integer', 'description' => 'Paged form: return accounts with a uid above this (0 for the first page).', 'default' => 0],
+    ],
+    'required' => [],
+  ],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,

@@ -47,13 +47,21 @@ final class PagedesignerMcpOperations {
           return $this->exporter->exportMenus() + ['status' => 'ok'];
 
         case 'get_users':
-          return $this->exporter->exportUsers() + ['status' => 'ok'];
+          return $this->exporter->exportUsers(
+            (int) ($arguments['after_uid'] ?? 0),
+            $this->pageSize($arguments, 'limit'),
+          ) + ['status' => 'ok'];
 
         case 'get_theme_settings':
           return $this->exporter->exportTheme() + ['status' => 'ok'];
 
         case 'get_webforms':
-          return $this->exporter->exportWebforms((bool) ($arguments['include_submissions'] ?? TRUE)) + ['status' => 'ok'];
+          return $this->exporter->exportWebforms(
+            (bool) ($arguments['include_submissions'] ?? TRUE),
+            isset($arguments['webform_id']) && $arguments['webform_id'] !== '' ? (string) $arguments['webform_id'] : NULL,
+            (int) ($arguments['after_sid'] ?? 0),
+            $this->pageSize($arguments, 'limit'),
+          ) + ['status' => 'ok'];
 
         case 'get_entities':
           return $this->getEntities($arguments);
@@ -75,6 +83,10 @@ final class PagedesignerMcpOperations {
    */
   protected function getMigrationManifest(array $arguments): array {
     $options = $this->exportOptions($arguments);
+    $batch_size = $this->pageSize($arguments, 'batch_size');
+    if ($batch_size !== NULL) {
+      return $this->getMigrationManifestBatch($options, (int) ($arguments['after_id'] ?? 0), $batch_size);
+    }
     $manifest = $this->exporter->buildMigrationManifest($options);
 
     $taxonomies = $this->exporter->exportTaxonomies();
@@ -94,6 +106,23 @@ final class PagedesignerMcpOperations {
       'webform_count' => count($webforms['webforms'] ?? []),
       'entities' => $entities,
     ];
+    return $manifest + ['status' => 'ok'];
+  }
+
+  /**
+   * One slice of the manifest (schema 0.16.0): pages and plain entities.
+   *
+   * The `source` block and the theme summary come with every slice — both
+   * are cheap — so a consumer can take them from whichever slice it likes.
+   * The step-3 counts of the unpaged manifest are left out: they cost a full
+   * export of users and webforms, which is what paging exists to avoid.
+   */
+  protected function getMigrationManifestBatch(array $options, int $after_id, int $batch_size): array {
+    $manifest = $this->exporter->buildMigrationManifest(['limit' => 0] + $options);
+    $batch = $this->exporter->discoverEntityBatch($options, $after_id, $batch_size);
+    $manifest['pages'] = $batch['pages'];
+    $manifest['content'] = ['entities' => $batch['entities']];
+    $manifest['paging'] = $batch['paging'];
     return $manifest + ['status' => 'ok'];
   }
 
@@ -122,22 +151,19 @@ final class PagedesignerMcpOperations {
    */
   protected function getEntities(array $arguments): array {
     $options = $this->exportOptions($arguments);
-    $manifest = $this->exporter->buildMigrationManifest($options);
-    $pd_entity_ids = [];
-    foreach ($manifest['pages'] as $page) {
-      $pd_entity_ids[(string) ($page['entity_type'] ?? 'node') . ':' . (string) ($page['entity_id'] ?? '')] = TRUE;
-    }
-    $entries = $this->exporter->discoverPlainEntities($options, $pd_entity_ids);
-
-    $requested = array_filter(array_map('strval', (array) ($arguments['entity_keys'] ?? [])));
+    $requested = array_values(array_filter(array_map('strval', (array) ($arguments['entity_keys'] ?? []))));
     if ($requested) {
-      $wanted = array_flip($requested);
-      $entries = array_values(array_filter(
-        $entries,
-        static fn (array $entry): bool => isset(
-          $wanted[(string) ($entry['entity_type'] ?? 'node') . ':' . (string) ($entry['entity_id'] ?? '')]
-        ),
-      ));
+      // The caller knows which entities it wants (from a paged manifest):
+      // load those, never the whole site.
+      $entries = $this->exporter->plainEntityEntries($requested, $options);
+    }
+    else {
+      $manifest = $this->exporter->buildMigrationManifest($options);
+      $pd_entity_ids = [];
+      foreach ($manifest['pages'] as $page) {
+        $pd_entity_ids[(string) ($page['entity_type'] ?? 'node') . ':' . (string) ($page['entity_id'] ?? '')] = TRUE;
+      }
+      $entries = $this->exporter->discoverPlainEntities($options, $pd_entity_ids);
     }
 
     $entities = [];
@@ -151,6 +177,14 @@ final class PagedesignerMcpOperations {
       ];
     }
     return ['status' => 'ok', 'entity_count' => count($entities), 'entities' => $entities];
+  }
+
+  /**
+   * A positive page size from the tool arguments, or NULL for "unpaged".
+   */
+  protected function pageSize(array $arguments, string $key): ?int {
+    $value = $arguments[$key] ?? NULL;
+    return is_numeric($value) && (int) $value > 0 ? (int) $value : NULL;
   }
 
   /**

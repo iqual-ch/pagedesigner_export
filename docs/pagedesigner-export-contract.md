@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.15.0` (every version additive; consumers check the major only).
+Current schema version: `0.16.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,45 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.16.0` — paged MCP export
+
+Additive; the package files do not change. A web request runs under PHP's
+memory and time limits, and on a site with tens of thousands of nodes the
+unpaged MCP calls exhaust them (each loaded every entity at once). The MCP
+tools therefore take optional paging arguments; without them they answer as
+before.
+
+| Tool | Arguments | Cursor in the result |
+| --- | --- | --- |
+| `get_migration_manifest` | `batch_size`, `after_id` | `paging: {after_id, next_after_id, scanned, total}` |
+| `get_entities` | `entity_keys` (loads only those) | — |
+| `get_users` | `limit`, `after_uid` | `paging: {after_uid, next_after_uid, total}` |
+| `get_webforms` | `webform_id`, `limit`, `after_sid` | `paging: {webform_id, after_sid, next_after_sid}` |
+
+A paged manifest slice covers the next `batch_size` entities by id after
+`after_id`, classified exactly as the unpaged manifest does: an entity with a
+pagedesigner root is a page (`pages`), any other entity outside the
+`pagedesigner*` bundles is plain (`content.entities`). Every slice carries
+`source` and `theme`; `limit` does not apply, and the step-3 counts
+(`vocabulary_count`, `user_count`, …) are left out. A cursor is `null` on the
+last page. `get_webforms` sets `next_after_sid` only when `webform_id` is
+given; list the forms first with `include_submissions: false`.
+
+A consumer reads a large site like this:
+
+```text
+get_migration_manifest {batch_size: 200, after_id: 0}      → repeat with next_after_id until null
+get_entities {entity_keys: [50 keys from content.entities]} → repeat per slice
+get_users {limit: 1000, after_uid: 0}                       → repeat with next_after_uid until null
+get_webforms {include_submissions: false, limit: 1}         → the forms with submissionCount
+get_webforms {webform_id, include_submissions: true, limit: 500, after_sid: 0} → per form, until null
+```
+
+A source on an older export ignores the arguments and answers unpaged; a
+consumer tells the two apart by the presence of `paging`. The drush package
+export also loads entities in chunks now and resets the entity cache after
+each, so its memory no longer grows with the site.
 
 ## Schema `0.15.0` — elements referenced outside the children tree
 

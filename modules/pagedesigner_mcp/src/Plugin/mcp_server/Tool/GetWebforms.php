@@ -17,11 +17,14 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'get_webforms',
   label: new TranslatableMarkup('Get webforms and submissions'),
-  description: new TranslatableMarkup('Export every webform with its config verbatim (elements, settings, handlers, translations) and, by default, its submissions (data, timestamps, IP, draft state, submitter uid + e-mail). Same shape as webforms.json of the drush package. A Pagedesigner webform element places a form by id; the target imports the forms AFTER users (submitters are re-linked by e-mail) and before nodes.'),
+  description: new TranslatableMarkup('Export every webform with its config verbatim (elements, settings, handlers, translations) and, by default, its submissions (data, timestamps, IP, draft state, submitter uid + e-mail). Same shape as webforms.json of the drush package. A Pagedesigner webform element places a form by id; the target imports the forms AFTER users (submitters are re-linked by e-mail) and before nodes. A large site pages: list the forms with include_submissions=false and a `limit`, then read each form\'s submissions with `webform_id`, `limit` and `after_sid`.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
       'include_submissions' => ['type' => 'boolean', 'description' => 'Include the submissions (default true). The submission count is exported either way.', 'default' => TRUE],
+      'webform_id' => ['type' => 'string', 'description' => 'Optional: export only this webform.'],
+      'limit' => ['type' => 'integer', 'description' => 'Optional page size for submissions, per webform. With it the result carries `paging: {webform_id, after_sid, next_after_sid}`; `next_after_sid` is set only when `webform_id` is given and more submissions follow.'],
+      'after_sid' => ['type' => 'integer', 'description' => 'Paged form: return submissions with a sid above this (0 for the first page).', 'default' => 0],
     ],
     'required' => [],
   ],
