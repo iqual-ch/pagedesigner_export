@@ -17,7 +17,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'get_entities',
   label: new TranslatableMarkup('Get entities'),
-  description: new TranslatableMarkup('Export content entities WITHOUT Pagedesigner roots (news, FAQs, ...): per-translation fields with media enrichment, one payload per entity. Same shape as the entities/*.json files of the drush package. Optionally filter by entity keys ("node:45").'),
+  description: new TranslatableMarkup('Export content entities WITHOUT Pagedesigner roots (news, FAQs, ...): per-translation fields with media enrichment, one payload per entity. Same shape as the entities/*.json files of the drush package. Optionally filter by entity keys ("node:45"): with keys only those entities are loaded, which is how a large site is read in slices; without them the whole site is discovered in one request.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [

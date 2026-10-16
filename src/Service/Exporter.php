@@ -113,7 +113,22 @@ class Exporter {
   // `field_styles`): a gallery's `field_gallery` → `gallery_gallery` element
   // → `gallery_item` children with their `field_media`. Before, every
   // gallery was exported without its images.
-  public const MIGRATION_SCHEMA_VERSION = '0.15.0';
+  // 0.16.0 pages the MCP export: `get_migration_manifest` takes `batch_size`
+  // and `after_id` and returns one slice of the site's entities (pages and
+  // plain entities together) with a `paging` cursor; `get_entities` with
+  // `entity_keys` loads only those entities; `get_users` and `get_webforms`
+  // page by uid / sid. A web request runs under the PHP memory and time
+  // limits, and a site with 20 000 nodes cannot be described in one: the
+  // unpaged calls exhausted 256 MB. Unpaged calls answer as before.
+  public const MIGRATION_SCHEMA_VERSION = '0.16.0';
+
+  /**
+   * Entities loaded at once by the unpaged discovery loops.
+   *
+   * The entity cache is reset after each chunk, so memory stays bounded by
+   * the chunk rather than by the site.
+   */
+  protected const LOAD_CHUNK_SIZE = 100;
 
   /**
    * The `iq_barrio.settings` keys that hold literal colours.
@@ -770,10 +785,19 @@ class Exporter {
    * The anonymous user is skipped (uid 0 owns nothing worth migrating) and the
    * implicit `authenticated` role is dropped from both lists — every account
    * has it, so it is never a mapping decision.
+   *
+   * @param int $afterUid
+   *   Paged form (schema 0.16.0): only accounts with a uid above this.
+   * @param int|null $limit
+   *   Paged form: at most this many accounts, and a `paging` cursor
+   *   `{after_uid, next_after_uid, total}` in the result (`next_after_uid`
+   *   NULL on the last page). NULL exports every account, unpaged.
    */
-  public function exportUsers(): array {
+  public function exportUsers(int $afterUid = 0, ?int $limit = NULL): array {
     if (!$this->entityTypeManager->hasDefinition('user')) {
-      return ['users' => [], 'roles' => []];
+      return ['users' => [], 'roles' => []] + ($limit !== NULL
+        ? ['paging' => ['after_uid' => $afterUid, 'next_after_uid' => NULL, 'total' => 0]]
+        : []);
     }
 
     $roles = [];
@@ -788,25 +812,39 @@ class Exporter {
 
     $users = [];
     $user_storage = $this->entityTypeManager->getStorage('user');
-    $uids = $user_storage->getQuery()
+    $query = $user_storage->getQuery()
       ->accessCheck(FALSE)
-      ->condition('uid', 0, '>')
-      ->sort('uid')
-      ->execute();
-    foreach ($user_storage->loadMultiple($uids) as $account) {
-      /** @var \Drupal\user\UserInterface $account */
-      $users[] = [
-        'uid' => (int) $account->id(),
-        'uuid' => $account->uuid(),
-        'name' => $account->getAccountName(),
-        'mail' => (string) ($account->getEmail() ?? ''),
-        'status' => (bool) $account->isActive(),
-        'roles' => array_values(array_diff($account->getRoles(), ['authenticated'])),
-        'created' => (int) $account->getCreatedTime(),
-      ];
+      ->condition('uid', max(0, $afterUid), '>')
+      ->sort('uid');
+    if ($limit !== NULL) {
+      $query->range(0, max(1, $limit));
+    }
+    $uids = array_values($query->execute());
+    foreach (array_chunk($uids, self::LOAD_CHUNK_SIZE * 5) as $chunk) {
+      foreach ($user_storage->loadMultiple($chunk) as $account) {
+        /** @var \Drupal\user\UserInterface $account */
+        $users[] = [
+          'uid' => (int) $account->id(),
+          'uuid' => $account->uuid(),
+          'name' => $account->getAccountName(),
+          'mail' => (string) ($account->getEmail() ?? ''),
+          'status' => (bool) $account->isActive(),
+          'roles' => array_values(array_diff($account->getRoles(), ['authenticated'])),
+          'created' => (int) $account->getCreatedTime(),
+        ];
+      }
+      $user_storage->resetCache($chunk);
     }
 
-    return ['users' => $users, 'roles' => $roles];
+    $result = ['users' => $users, 'roles' => $roles];
+    if ($limit !== NULL) {
+      $result['paging'] = [
+        'after_uid' => $afterUid,
+        'next_after_uid' => count($uids) >= max(1, $limit) && $uids ? (int) end($uids) : NULL,
+        'total' => (int) $user_storage->getQuery()->accessCheck(FALSE)->condition('uid', 0, '>')->count()->execute(),
+      ];
+    }
+    return $result;
   }
 
   /**
@@ -828,14 +866,26 @@ class Exporter {
    *
    * @param bool $withSubmissions
    *   Whether to include submissions (the count is exported either way).
+   * @param string|null $webformId
+   *   Paged form (schema 0.16.0): only this webform.
+   * @param int $afterSid
+   *   Paged form: only submissions with a sid above this.
+   * @param int|null $limit
+   *   Paged form: at most this many submissions per webform, and a `paging`
+   *   cursor `{webform_id, after_sid, next_after_sid}` in the result
+   *   (`next_after_sid` NULL on the last page, and whenever no single webform
+   *   was asked for). NULL exports everything, unpaged.
    *
    * @return array
    *   `{webforms: [{id, uuid, label, status, langcode, config, configTranslations,
    *   submissionCount, submissions}]}`.
    */
-  public function exportWebforms(bool $withSubmissions = TRUE): array {
+  public function exportWebforms(bool $withSubmissions = TRUE, ?string $webformId = NULL, int $afterSid = 0, ?int $limit = NULL): array {
+    $paging = $limit !== NULL
+      ? ['paging' => ['webform_id' => $webformId, 'after_sid' => $afterSid, 'next_after_sid' => NULL]]
+      : [];
     if (!$this->entityTypeManager->hasDefinition('webform')) {
-      return ['webforms' => []];
+      return ['webforms' => []] + $paging;
     }
     $webform_storage = $this->entityTypeManager->getStorage('webform');
     $submission_storage = $this->entityTypeManager->hasDefinition('webform_submission')
@@ -849,7 +899,10 @@ class Exporter {
     $mail_by_uid = [];
 
     $webforms = [];
-    foreach ($webform_storage->loadMultiple() as $webform_id => $webform) {
+    $loaded = $webformId !== NULL && $webformId !== ''
+      ? $webform_storage->loadMultiple([$webformId])
+      : $webform_storage->loadMultiple();
+    foreach ($loaded as $webform_id => $webform) {
       $webform_id = (string) $webform_id;
       if (str_starts_with($webform_id, 'example_') || str_starts_with($webform_id, 'template_')) {
         continue;
@@ -872,15 +925,30 @@ class Exporter {
       }
 
       $submission_ids = [];
+      $submission_count = 0;
       if ($submission_storage !== NULL) {
-        $submission_ids = $submission_storage->getQuery()
+        $submission_count = (int) $submission_storage->getQuery()
           ->accessCheck(FALSE)
           ->condition('webform_id', $webform_id)
-          ->sort('sid')
+          ->count()
           ->execute();
       }
+      if ($submission_storage !== NULL && $withSubmissions && $submission_count) {
+        $query = $submission_storage->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('webform_id', $webform_id)
+          ->condition('sid', max(0, $afterSid), '>')
+          ->sort('sid');
+        if ($limit !== NULL) {
+          $query->range(0, max(1, $limit));
+        }
+        $submission_ids = array_values($query->execute());
+        if ($limit !== NULL && $webformId !== NULL && count($submission_ids) >= max(1, $limit)) {
+          $paging['paging']['next_after_sid'] = (int) end($submission_ids);
+        }
+      }
       $submissions = [];
-      if ($withSubmissions && $submission_ids) {
+      if ($submission_ids) {
         foreach (array_chunk(array_values($submission_ids), 200) as $chunk) {
           foreach ($submission_storage->loadMultiple($chunk) as $submission) {
             /** @var \Drupal\webform\WebformSubmissionInterface $submission */
@@ -921,12 +989,12 @@ class Exporter {
         'langcode' => (string) ($config['langcode'] ?? $default_langcode),
         'config' => $config,
         'configTranslations' => $translations,
-        'submissionCount' => count($submission_ids),
+        'submissionCount' => $submission_count,
         'submissions' => $submissions,
       ];
     }
 
-    return ['webforms' => $webforms];
+    return ['webforms' => $webforms] + $paging;
   }
 
   /**
@@ -1006,62 +1074,81 @@ class Exporter {
     $ids = $query->execute();
     $entries = [];
     $pd_fields_by_bundle = [];
-    foreach ($storage->loadMultiple($ids) as $entity) {
-      $key = $entityTypeId . ':' . $entity->id();
-      if (isset($pd_entity_ids[$key])) {
-        continue;
-      }
-      // A pagedesigner-bearing entity is a composition page even when the
-      // page limit kept it out of this run's pages — never a plain entity.
-      $bundle = $entity->bundle();
-      // Pagedesigner-ecosystem bundles are editor infrastructure, never
-      // migratable content (see discoverMigrationPages).
-      if (str_starts_with($bundle, 'pagedesigner')) {
-        continue;
-      }
-      if (!array_key_exists($bundle, $pd_fields_by_bundle)) {
-        $pd_fields_by_bundle[$bundle] = $this->getPagedesignerFields($entityTypeId, $bundle, NULL);
-      }
-      if ($pd_fields_by_bundle[$bundle]) {
-        $all_langcodes = $this->getExportableLangcodes($entity, TRUE);
-        if ($this->getPagedesignerRootsByField($entity, $pd_fields_by_bundle[$bundle], $all_langcodes)) {
+    foreach (array_chunk(array_values($ids), self::LOAD_CHUNK_SIZE) as $chunk) {
+      foreach ($storage->loadMultiple($chunk) as $entity) {
+        $key = $entityTypeId . ':' . $entity->id();
+        if (isset($pd_entity_ids[$key])) {
           continue;
         }
+        // A pagedesigner-bearing entity is a composition page even when the
+        // page limit kept it out of this run's pages — never a plain entity.
+        $bundle = $entity->bundle();
+        // Pagedesigner-ecosystem bundles are editor infrastructure, never
+        // migratable content (see discoverMigrationPages).
+        if (str_starts_with($bundle, 'pagedesigner')) {
+          continue;
+        }
+        if (!array_key_exists($bundle, $pd_fields_by_bundle)) {
+          $pd_fields_by_bundle[$bundle] = $this->getPagedesignerFields($entityTypeId, $bundle, NULL);
+        }
+        if ($pd_fields_by_bundle[$bundle]) {
+          $all_langcodes = $this->getExportableLangcodes($entity, TRUE);
+          if ($this->getPagedesignerRootsByField($entity, $pd_fields_by_bundle[$bundle], $all_langcodes)) {
+            continue;
+          }
+        }
+        $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+        if (!$langcodes) {
+          continue;
+        }
+        $entries[] = $this->buildPlainEntityEntry($entity, $langcodes);
+        if ($limit !== NULL && count($entries) >= $limit) {
+          $storage->resetCache($chunk);
+          break 2;
+        }
       }
-      $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
-      if (!$langcodes) {
-        continue;
-      }
-      $titles = [];
-      $paths = [];
-      $statuses = [];
-      foreach ($langcodes as $langcode) {
-        $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
-        $titles[$langcode] = $translation->label();
-        $paths[$langcode] = $this->getEntityPath($translation, $langcode);
-        $statuses[$langcode] = $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE;
-      }
-      $entry = [
-        'id' => $key,
-        'entity_type' => $entityTypeId,
-        'bundle' => $entity->bundle(),
-        'entity_id' => is_numeric($entity->id()) ? (int) $entity->id() : $entity->id(),
-        'uuid' => method_exists($entity, 'uuid') ? $entity->uuid() : NULL,
-        'default_langcode' => $entity->language()->getId(),
-        'langcodes' => $langcodes,
-        'titles' => $titles,
-        'paths' => $paths,
-        'statuses' => $statuses,
-        'export_file' => 'entities/' . preg_replace('/[^A-Za-z0-9_.-]+/', '-', $entityTypeId . '-' . $entity->id()) . '.json',
-      ];
-      $entry += $this->buildEntityMetadata($entity, $langcodes);
-      $entries[] = $entry;
-      if ($limit !== NULL && count($entries) >= $limit) {
-        break;
-      }
+      $storage->resetCache($chunk);
     }
 
     return $entries;
+  }
+
+  /**
+   * The manifest entry of one plain entity (without content_hash yet).
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   The entity.
+   * @param string[] $langcodes
+   *   Its exportable language codes.
+   *
+   * @return array
+   *   The manifest entity entry.
+   */
+  protected function buildPlainEntityEntry(ContentEntityInterface $entity, array $langcodes): array {
+    $entityTypeId = $entity->getEntityTypeId();
+    $titles = [];
+    $paths = [];
+    $statuses = [];
+    foreach ($langcodes as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      $titles[$langcode] = $translation->label();
+      $paths[$langcode] = $this->getEntityPath($translation, $langcode);
+      $statuses[$langcode] = $translation instanceof EntityPublishedInterface ? $translation->isPublished() : TRUE;
+    }
+    $entry = [
+      'id' => $entityTypeId . ':' . $entity->id(),
+      'entity_type' => $entityTypeId,
+      'bundle' => $entity->bundle(),
+      'entity_id' => is_numeric($entity->id()) ? (int) $entity->id() : $entity->id(),
+      'uuid' => method_exists($entity, 'uuid') ? $entity->uuid() : NULL,
+      'default_langcode' => $entity->language()->getId(),
+      'langcodes' => $langcodes,
+      'titles' => $titles,
+      'paths' => $paths,
+      'statuses' => $statuses,
+      'export_file' => 'entities/' . preg_replace('/[^A-Za-z0-9_.-]+/', '-', $entityTypeId . '-' . $entity->id()) . '.json',
+    ];
+    return $entry + $this->buildEntityMetadata($entity, $langcodes);
   }
 
   /**
@@ -1375,30 +1462,188 @@ class Exporter {
         continue;
       }
 
-      /** @var \Drupal\Core\Entity\ContentEntityInterface[] $entities */
-      $entities = $storage->loadMultiple($entityIds);
-      foreach ($entities as $entity) {
-        $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
-        if (!$langcodes) {
-          continue;
-        }
-
-        $rootsByField = $this->getPagedesignerRootsByField($entity, $pagedesignerFields, $langcodes);
-        $rootCount = array_sum(array_map('count', $rootsByField));
-        foreach ($rootsByField as $fieldName => $rootIds) {
-          foreach ($rootIds as $rootId) {
-            $pages[] = $this->buildPageManifestEntry($entity, $fieldName, (string) $rootId, $langcodes, $rootCount > 1, $sanitizeLocalUrls);
+      foreach (array_chunk(array_values($entityIds), self::LOAD_CHUNK_SIZE) as $chunk) {
+        /** @var \Drupal\Core\Entity\ContentEntityInterface[] $entities */
+        $entities = $storage->loadMultiple($chunk);
+        foreach ($entities as $entity) {
+          foreach ($this->pageEntriesFor($entity, $pagedesignerFields, $includeUnpublished, $sanitizeLocalUrls) as $entry) {
+            $pages[] = $entry;
             if ($limit !== NULL && count($pages) >= $limit) {
-              break 3;
+              $storage->resetCache($chunk);
+              break 4;
             }
           }
         }
+        $storage->resetCache($chunk);
       }
     }
 
     $this->stampCompositionSize($pages);
 
     return $pages;
+  }
+
+  /**
+   * The manifest page entries of one entity: one per exportable root.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
+   *   Source entity.
+   * @param string[] $pagedesignerFields
+   *   The bundle's pagedesigner fields.
+   * @param bool $includeUnpublished
+   *   Whether unpublished translations are included.
+   * @param bool $sanitizeLocalUrls
+   *   Whether to rewrite local URLs.
+   *
+   * @return array
+   *   Manifest page entries; empty when no exportable translation has a root.
+   */
+  protected function pageEntriesFor(ContentEntityInterface $entity, array $pagedesignerFields, bool $includeUnpublished, bool $sanitizeLocalUrls): array {
+    $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+    if (!$langcodes) {
+      return [];
+    }
+    $rootsByField = $this->getPagedesignerRootsByField($entity, $pagedesignerFields, $langcodes);
+    $rootCount = array_sum(array_map('count', $rootsByField));
+    $entries = [];
+    foreach ($rootsByField as $fieldName => $rootIds) {
+      foreach ($rootIds as $rootId) {
+        $entries[] = $this->buildPageManifestEntry($entity, $fieldName, (string) $rootId, $langcodes, $rootCount > 1, $sanitizeLocalUrls);
+      }
+    }
+    return $entries;
+  }
+
+  /**
+   * One slice of the site's entities, classified as pages or plain entities.
+   *
+   * The paged form of buildMigrationManifest() + discoverPlainEntities(), for
+   * a caller bound by the PHP limits of a web request: it walks the entity
+   * ids in ascending order, `$batchSize` at a time after `$afterId`, and
+   * sorts each entity exactly as the two unpaged walks do — an entity with a
+   * pagedesigner root in any translation is a page (and never a plain
+   * entity, even when none of its rooted translations is exportable), every
+   * other entity outside the `pagedesigner*` bundles is plain.
+   *
+   * @param array $options
+   *   Export options (entity_type, bundle, field, include_unpublished,
+   *   sanitize_local_urls). `limit` and `entity_limit` do not apply: the
+   *   caller decides how many slices it reads.
+   * @param int $afterId
+   *   The last entity id of the previous slice; 0 for the first.
+   * @param int $batchSize
+   *   Entities per slice.
+   *
+   * @return array
+   *   `{pages, entities, paging: {after_id, next_after_id, scanned, total}}`;
+   *   `next_after_id` is NULL on the last slice.
+   */
+  public function discoverEntityBatch(array $options, int $afterId, int $batchSize): array {
+    $entityTypeId = (string) ($options['entity_type'] ?? 'node');
+    $entityType = $this->entityTypeManager->getDefinition($entityTypeId, FALSE);
+    if (!$entityType || !$entityType->entityClassImplements(ContentEntityInterface::class)) {
+      throw new \Exception("Entity type is not a content entity: {$entityTypeId}");
+    }
+    $batchSize = max(1, $batchSize);
+    $storage = $this->entityTypeManager->getStorage($entityTypeId);
+    $idKey = $entityType->getKey('id') ?: 'id';
+    $bundleKey = $entityType->getKey('bundle');
+    $bundleFilter = $options['bundle'] ?? NULL;
+    $fieldFilter = $options['field'] ?? NULL;
+    $includeUnpublished = (bool) ($options['include_unpublished'] ?? FALSE);
+    $sanitizeLocalUrls = (bool) ($options['sanitize_local_urls'] ?? TRUE);
+
+    $base = $storage->getQuery()->accessCheck(FALSE);
+    if ($bundleFilter && $bundleKey) {
+      $base->condition($bundleKey, $bundleFilter);
+    }
+    $total = (int) (clone $base)->count()->execute();
+    $ids = array_values((clone $base)
+      ->condition($idKey, $afterId, '>')
+      ->sort($idKey, 'ASC')
+      ->range(0, $batchSize)
+      ->execute());
+
+    $pages = [];
+    $entities = [];
+    $pdFields = [];
+    $allPdFields = [];
+    foreach ($storage->loadMultiple($ids) as $entity) {
+      /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
+      $bundle = $entity->bundle();
+      // Pagedesigner-ecosystem bundles are editor infrastructure, never
+      // migratable content (see discoverMigrationPages).
+      if (str_starts_with($bundle, 'pagedesigner')) {
+        continue;
+      }
+      $pdFields[$bundle] ??= $this->getPagedesignerFields($entityTypeId, $bundle, $fieldFilter);
+      $allPdFields[$bundle] ??= $this->getPagedesignerFields($entityTypeId, $bundle, NULL);
+      if ($allPdFields[$bundle]
+        && $this->getPagedesignerRootsByField($entity, $allPdFields[$bundle], $this->getExportableLangcodes($entity, TRUE))) {
+        if ($pdFields[$bundle]) {
+          array_push($pages, ...$this->pageEntriesFor($entity, $pdFields[$bundle], $includeUnpublished, $sanitizeLocalUrls));
+        }
+        continue;
+      }
+      $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+      if ($langcodes) {
+        $entities[] = $this->buildPlainEntityEntry($entity, $langcodes);
+      }
+    }
+    $storage->resetCache($ids);
+    $this->stampCompositionSize($pages);
+
+    $last = $ids ? end($ids) : NULL;
+    return [
+      'pages' => $pages,
+      'entities' => $entities,
+      'paging' => [
+        'after_id' => $afterId,
+        'next_after_id' => count($ids) >= $batchSize && $last !== NULL ? (int) $last : NULL,
+        'scanned' => count($ids),
+        'total' => $total,
+      ],
+    ];
+  }
+
+  /**
+   * Plain-entity manifest entries for the given "entity_type:id" keys.
+   *
+   * What get_entities needs when the caller already knows which entities it
+   * wants (from a paged manifest): it loads those and nothing else, instead
+   * of rediscovering the whole site per call.
+   *
+   * @param string[] $keys
+   *   "entity_type:id" keys.
+   * @param array $options
+   *   Export options (include_unpublished).
+   *
+   * @return array
+   *   Manifest entity entries, in key order; unknown keys and entities
+   *   without an exportable translation are left out.
+   */
+  public function plainEntityEntries(array $keys, array $options): array {
+    $includeUnpublished = (bool) ($options['include_unpublished'] ?? FALSE);
+    $idsByType = [];
+    foreach ($keys as $key) {
+      [$type, $id] = array_pad(explode(':', (string) $key, 2), 2, '');
+      if ($type !== '' && $id !== '' && $this->entityTypeManager->hasDefinition($type)) {
+        $idsByType[$type][] = $id;
+      }
+    }
+    $entries = [];
+    foreach ($idsByType as $type => $ids) {
+      foreach ($this->entityTypeManager->getStorage($type)->loadMultiple($ids) as $entity) {
+        if (!$entity instanceof ContentEntityInterface) {
+          continue;
+        }
+        $langcodes = $this->getExportableLangcodes($entity, $includeUnpublished);
+        if ($langcodes) {
+          $entries[] = $this->buildPlainEntityEntry($entity, $langcodes);
+        }
+      }
+    }
+    return $entries;
   }
 
   /**
