@@ -36,10 +36,9 @@ function pagedesigner_mcp_ensure_service_account(): void {
       'label' => 'Pagedesigner MCP',
     ]);
   }
-  // `access mcp server` gates the mcp_server endpoint (primary transport);
-  // `use mcp server` keeps the legacy drupal/mcp endpoint working during
-  // the transition window; `use pagedesigner_mcp tools` is our own gate.
-  foreach (['access mcp server', 'use mcp server', 'use pagedesigner_mcp tools'] as $permission) {
+  // `access mcp server` gates the mcp_server endpoint;
+  // `use pagedesigner_mcp tools` is our own gate.
+  foreach (['access mcp server', 'use pagedesigner_mcp tools'] as $permission) {
     $role->grantPermission($permission);
   }
   $role->save();
