@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.16.0` (every version additive; consumers check the major only).
+Current schema version: `0.17.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,36 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.17.0` — media linked by route
+
+Additive. A document is as often linked from a text
+(`<a href="/de/media/12">`) or a link field (`internal:/media/12`,
+`entity:media/12`) as placed in a media field. The route names the media
+only, and a consumer has no way to turn `/media/12` into the file. Every
+exported element now lists the media its field values link by route, in
+`linked_media`, next to `fields`:
+
+```jsonc
+"linked_media": [
+  {
+    "href": "/de/media/12",            // the target as found (markup href or link uri)
+    "media_id": 12,
+    "referenced_entity": { /* the same metadata a placed media carries */ },
+    "filename": "anmeldung.pdf",      // the payload file, as on a placed media
+    "url": "https://www.example.com/sites/default/files/anmeldung.pdf",
+    "sourceUrl": "https://www.example.com/sites/default/files/anmeldung.pdf",
+    "mime_type": "application/pdf"
+  }
+]
+```
+
+Relative routes and routes under one of the site's own hosts (`source.hosts`,
+`base_url`) count, with or without a language prefix; a route on another site
+is another site's media and is left alone. A route whose media no longer
+exists is omitted. Absent when the element links no media. A consumer
+rewrites the link to the file it creates from `referenced_entity`, exactly as
+it does for a placed document.
 
 ## Schema `0.16.0` — paged MCP export
 
