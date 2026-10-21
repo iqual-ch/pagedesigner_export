@@ -120,7 +120,7 @@ class Exporter {
   // page by uid / sid. A web request runs under the PHP memory and time
   // limits, and a site with 20 000 nodes cannot be described in one: the
   // unpaged calls exhausted 256 MB. Unpaged calls answer as before.
-  public const MIGRATION_SCHEMA_VERSION = '0.16.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.17.0';
 
   /**
    * Entities loaded at once by the unpaged discovery loops.
@@ -2527,6 +2527,14 @@ class Exporter {
       }
     }
 
+    // Media an editor linked from the element's text or link fields by
+    // route (`/de/media/12`) rather than placed in a media field: resolved
+    // here, where the media entity is at hand (schema 0.17.0).
+    $linkedMedia = $this->linkedMediaIn($data['fields'] ?? [], $element->language()->getId(), $sanitizeLocalUrls);
+    if ($linkedMedia) {
+      $data['linked_media'] = $linkedMedia;
+    }
+
     // Export children references.
     if ($element->hasField('children')) {
       $childrenValues = $element->get('children')->getValue();
@@ -2538,6 +2546,138 @@ class Exporter {
     }
 
     return $data;
+  }
+
+  /**
+   * Media linked by route from an element's field values.
+   *
+   * A document is as often linked from a text (`<a href="/de/media/12">`) or
+   * a link field (`internal:/media/12`, `entity:media/12`) as placed in a
+   * media field. The route names the media only; a consumer that resolves
+   * `/media/<id>` to the file has to do it here, where the entity is.
+   * Relative routes and routes on one of the site's own hosts count; a
+   * route on another site is another site's media.
+   *
+   * @param array $fields
+   *   The element's exported field values.
+   * @param string $langcode
+   *   The element's language, for the media translation.
+   * @param bool $sanitizeLocalUrls
+   *   Whether local generated file URLs should be sanitized.
+   *
+   * @return array
+   *   One entry per linked route: `href` as found, `media_id`, the media's
+   *   `referenced_entity` metadata, and the payload file's `url`, `filename`
+   *   and `mime_type`. Empty when nothing links a media.
+   */
+  protected function linkedMediaIn(array $fields, string $langcode, bool $sanitizeLocalUrls): array {
+    $hrefs = [];
+    $this->collectLinkTargets($fields, $hrefs);
+    if (!$hrefs) {
+      return [];
+    }
+    $storage = $this->entityTypeManager->getStorage('media');
+    $linked = [];
+    foreach (array_unique($hrefs) as $href) {
+      $mediaId = $this->mediaIdFromRoute($href);
+      if ($mediaId === NULL) {
+        continue;
+      }
+      $media = $storage->load($mediaId);
+      if (!$media instanceof ContentEntityInterface) {
+        continue;
+      }
+      if ($media->hasTranslation($langcode)) {
+        $media = $media->getTranslation($langcode);
+      }
+      $metadata = $this->buildMediaReferenceMetadata($media, $sanitizeLocalUrls);
+      $entry = [
+        'href' => $href,
+        'media_id' => $mediaId,
+        'referenced_entity' => $metadata,
+      ];
+      $payloadFile = $this->pickMediaPayloadFile($metadata);
+      if ($payloadFile) {
+        $entry['filename'] = $payloadFile['filename'] ?? NULL;
+        $entry['url'] = $payloadFile['url'] ?? NULL;
+        $entry['sourceUrl'] = $payloadFile['url'] ?? NULL;
+        $entry['mime_type'] = $payloadFile['mime_type'] ?? NULL;
+      }
+      $linked[] = $entry;
+    }
+    return $linked;
+  }
+
+  /**
+   * Every link target in exported field values: hrefs in markup, link uris.
+   *
+   * @param mixed $value
+   *   A field value tree.
+   * @param array $hrefs
+   *   Collected targets, appended to.
+   */
+  protected function collectLinkTargets(mixed $value, array &$hrefs): void {
+    if (is_array($value)) {
+      foreach ($value as $key => $item) {
+        if ($key === 'uri' && is_string($item) && $item !== '') {
+          $hrefs[] = $item;
+        }
+        else {
+          $this->collectLinkTargets($item, $hrefs);
+        }
+      }
+      return;
+    }
+    if (is_string($value) && str_contains($value, 'media')) {
+      if (preg_match_all('/href\s*=\s*["\']([^"\']+)["\']/i', $value, $matches)) {
+        foreach ($matches[1] as $href) {
+          $hrefs[] = html_entity_decode($href, ENT_QUOTES | ENT_HTML5);
+        }
+      }
+    }
+  }
+
+  /**
+   * The media id a link target routes to, or NULL when it is no media route.
+   *
+   * Accepts `entity:media/12`, `internal:/media/12`, `/media/12`,
+   * `/de/media/12` and the same paths under one of the site's hosts; a
+   * trailing `/edit`, query or fragment does not change the media.
+   *
+   * @param string $target
+   *   A link target as stored or written.
+   *
+   * @return int|null
+   *   The media id, or NULL.
+   */
+  protected function mediaIdFromRoute(string $target): ?int {
+    $target = trim($target);
+    if (preg_match('#^entity:media/(\d+)$#', $target, $m)) {
+      return (int) $m[1];
+    }
+    if (str_starts_with($target, 'internal:')) {
+      $target = substr($target, strlen('internal:'));
+    }
+    $parts = parse_url($target);
+    if ($parts === FALSE || empty($parts['path'])) {
+      return NULL;
+    }
+    if (!empty($parts['host'])) {
+      $host = strtolower($parts['host']);
+      $own = array_map('strtolower', $this->siteHosts());
+      $base = parse_url((string) $this->getBaseUrl(), PHP_URL_HOST);
+      if ($base) {
+        $own[] = strtolower($base);
+      }
+      $strip = static fn(string $h): string => preg_replace('/^www\./', '', $h);
+      if (!in_array($strip($host), array_map($strip, $own), TRUE)) {
+        return NULL;
+      }
+    }
+    if (preg_match('#^/(?:[a-z]{2,3}(?:-[a-z]{2,4})?/)?media/(\d+)(?:/|$)#i', $parts['path'], $m)) {
+      return (int) $m[1];
+    }
+    return NULL;
   }
 
   /**
