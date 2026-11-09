@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.17.0` (every version additive; consumers check the major only).
+Current schema version: `0.18.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,56 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.18.0` — placed blocks resolved
+
+Additive. A `block` element carried only the id of the block it places
+(`views_block__news_teaser_block_1`), and a consumer had to guess from the
+spelling what the block lists and how. Every block element now carries
+`block`, next to `fields`:
+
+```jsonc
+"block": {
+  "id": "views_block__news_teaser_block_1",   // the block config entity id
+  "plugin": "views_block:news_teaser-block_1",
+  "provider": "views",
+  "status": true,
+  "label": "", "label_display": false,
+  "settings": { "views_label": "", "items_per_page": "none" },   // the plugin's scalar settings
+  "view": {                                   // views blocks only (and derivatives such as adaptable_views_block)
+    "id": "news_teaser", "label": "News teaser", "status": true,
+    "display": "block_1", "display_title": "Latest news", "block_description": "",
+    "base_table": "node_field_data", "base_entity_type": "node",
+    "search_api_index": null,                 // the index id when the view is built on a Search API index
+    "bundles": ["news"],                      // from the display's bundle filter
+    "arguments": [                            // contextual filters, resolved through the display's `defaults`
+      { "id": "field_topic_target_id", "field": "field_topic_target_id", "table": "node__field_topic",
+        "plugin_id": "entity_target_id", "default_action": "default",
+        "default_argument_type": "node",      // `node` = the page the block is placed on
+        "default_argument_options": {}, "validate": "none" }
+    ],
+    "filters": [                              // minus status, language and bundle
+      { "id": "field_category_target_id", "field": "field_category_target_id", "table": "node__field_category",
+        "plugin_id": "taxonomy_index_tid", "operator": "or",
+        "exposed": true, "label": "Category", "identifier": "category",
+        "values": ["12", "15"],               // preset or fixed values, as strings
+        "vocabulary": "category",
+        "terms": [{ "tid": 12, "uuid": "…", "name": "Events", "vocabulary": "category" }] }
+    ],
+    "sorts": [{ "id": "created", "field": "created", "order": "DESC", "exposed": false }],
+    "pager": "some", "items_per_page": 3, "offset": 0   // the placement's items_per_page overrides the display's
+  }
+}
+```
+
+A block whose config no longer exists exports `{id, missing: true}`; a view
+that no longer exists exports `view: {id, display, missing: true}`. Other
+block plugins (a webform block, a menu block) carry their plugin id and
+scalar settings (`webform_id`) and no `view`. Nothing here decides what the
+target shows: a consumer reads a contextual argument of type `node` as
+"listing related to this page", an exposed filter as a visitor's choice, a
+fixed term filter as a preselection, and a small `items_per_page` with no
+filter as "the latest N".
 
 ## Schema `0.17.0` — media linked by route
 
