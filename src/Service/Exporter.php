@@ -113,6 +113,11 @@ class Exporter {
   // `field_styles`): a gallery's `field_gallery` → `gallery_gallery` element
   // → `gallery_item` children with their `field_media`. Before, every
   // gallery was exported without its images.
+  // 0.18.0 resolves every placed block (`block` on the element, next to
+  // `fields`): the block's plugin and settings, and for a views block the
+  // display's base entity type and bundles, contextual arguments, exposed
+  // and fixed filters (with the terms they are fixed to), sorts and pager.
+  // A consumer used to guess all of that from the block id's spelling.
   // 0.16.0 pages the MCP export: `get_migration_manifest` takes `batch_size`
   // and `after_id` and returns one slice of the site's entities (pages and
   // plain entities together) with a `paging` cursor; `get_entities` with
@@ -120,7 +125,7 @@ class Exporter {
   // page by uid / sid. A web request runs under the PHP memory and time
   // limits, and a site with 20 000 nodes cannot be described in one: the
   // unpaged calls exhausted 256 MB. Unpaged calls answer as before.
-  public const MIGRATION_SCHEMA_VERSION = '0.17.0';
+  public const MIGRATION_SCHEMA_VERSION = '0.18.0';
 
   /**
    * Entities loaded at once by the unpaged discovery loops.
@@ -2244,6 +2249,261 @@ class Exporter {
   }
 
   /**
+   * What a placed block is, from its configuration.
+   *
+   * A Pagedesigner `block` element holds the id of a block config entity
+   * (`views_block__news_teaser_block_1`); the id is the only fact about the
+   * block the export carried, and a consumer had to guess from its spelling
+   * what the block lists and how. The block's plugin says what it is; for a
+   * views block the view display says the rest: which entity type and
+   * bundles it lists, whether it takes the current page as a contextual
+   * argument, which filters the visitor can set and which are fixed (with
+   * the terms they are fixed to), how many items a page shows. The consumer
+   * decides from these what the target lists; nothing here decides.
+   *
+   * @param array $values
+   *   The `field_block` values.
+   * @param string $langcode
+   *   The element's language, for term labels.
+   *
+   * @return array
+   *   `{id, plugin, provider, status, settings, view?}`, empty when the field
+   *   is empty or the block no longer exists.
+   */
+  protected function blockDescriptor(array $values, string $langcode): array {
+    $blockId = (string) ($values[0]['target_id'] ?? '');
+    if ($blockId === '' || !$this->entityTypeManager->hasDefinition('block')) {
+      return [];
+    }
+    try {
+      $block = $this->entityTypeManager->getStorage('block')->load($blockId);
+    }
+    catch (\Exception $e) {
+      $this->loggerFactory->get('pagedesigner_export')->warning('Block @id could not be loaded: @message', ['@id' => $blockId, '@message' => $e->getMessage()]);
+      return [];
+    }
+    if (!$block) {
+      return ['id' => $blockId, 'missing' => TRUE];
+    }
+    $pluginId = (string) $block->getPluginId();
+    $settings = (array) $block->get('settings');
+    $descriptor = [
+      'id' => $blockId,
+      'plugin' => $pluginId,
+      'provider' => (string) ($settings['provider'] ?? ''),
+      'status' => (bool) $block->status(),
+      'label' => (string) ($settings['label'] ?? ''),
+      'label_display' => (bool) ($settings['label_display'] ?? FALSE),
+      // The plugin's own scalar settings (a webform block's form id, a menu
+      // block's menu); nested structures are the view's, described below.
+      'settings' => array_filter($settings, static fn ($value, $key) => is_scalar($value) && !in_array($key, ['id', 'provider', 'label', 'label_display'], TRUE), ARRAY_FILTER_USE_BOTH),
+    ];
+    // `views_block:<view>-<display>`, and the derivatives other modules
+    // build on it (`adaptable_views_block:<view>-<display>`).
+    if (preg_match('/(?:^|_)views_block:(.+)$/', $pluginId, $match)) {
+      [$viewId, $displayId] = array_pad(explode('-', $match[1], 2), 2, 'default');
+      $view = $this->viewDisplayDescriptor($viewId, $displayId, $settings, $langcode);
+      if ($view) {
+        $descriptor['view'] = $view;
+      }
+    }
+    return $descriptor;
+  }
+
+  /**
+   * Display options the views `defaults` map resolves for one display.
+   *
+   * A display inherits every option group from the `default` display unless
+   * its `defaults` map says `false` for that group (or it carries the group
+   * without a `defaults` entry).
+   */
+  protected function resolvedDisplayOptions(array $displays, string $displayId): array {
+    $default = (array) ($displays['default']['display_options'] ?? []);
+    $own = (array) ($displays[$displayId]['display_options'] ?? []);
+    $defaults = (array) ($own['defaults'] ?? []);
+    $resolved = $default;
+    foreach ($own as $key => $value) {
+      if ($key === 'defaults') {
+        continue;
+      }
+      $usesDefault = array_key_exists($key, $defaults) ? (bool) $defaults[$key] : FALSE;
+      if (!$usesDefault) {
+        $resolved[$key] = $value;
+      }
+    }
+    foreach ($defaults as $key => $usesDefault) {
+      if ($usesDefault === FALSE && !array_key_exists($key, $own)) {
+        unset($resolved[$key]);
+      }
+    }
+    return $resolved;
+  }
+
+  /**
+   * A views block display, as data a consumer can decide a listing from.
+   *
+   * @return array
+   *   `{id, label, status, display, base_table, base_entity_type,
+   *   search_api_index, bundles, arguments[], filters[], sorts[], pager,
+   *   items_per_page}`, or empty when the view does not exist.
+   */
+  protected function viewDisplayDescriptor(string $viewId, string $displayId, array $blockSettings, string $langcode): array {
+    if (!$this->entityTypeManager->hasDefinition('view')) {
+      return [];
+    }
+    try {
+      $view = $this->entityTypeManager->getStorage('view')->load($viewId);
+    }
+    catch (\Exception $e) {
+      $this->loggerFactory->get('pagedesigner_export')->warning('View @id could not be loaded: @message', ['@id' => $viewId, '@message' => $e->getMessage()]);
+      return [];
+    }
+    if (!$view) {
+      return ['id' => $viewId, 'display' => $displayId, 'missing' => TRUE];
+    }
+    $displays = (array) $view->get('display');
+    $options = $this->resolvedDisplayOptions($displays, $displayId);
+    $baseTable = (string) $view->get('base_table');
+
+    $bundles = [];
+    $filters = [];
+    foreach ((array) ($options['filters'] ?? []) as $filterId => $filter) {
+      if (!is_array($filter)) {
+        continue;
+      }
+      $pluginId = (string) ($filter['plugin_id'] ?? '');
+      $field = (string) ($filter['field'] ?? $filterId);
+      // The bundle filter says what the view lists; publication and
+      // language filters say nothing a consumer decides on.
+      if ($pluginId === 'bundle' || $field === 'type') {
+        $bundles = array_values(array_map('strval', array_keys(array_filter((array) ($filter['value'] ?? [])))));
+        continue;
+      }
+      if (in_array($field, ['status', 'langcode', 'default_langcode', 'status_extra'], TRUE)) {
+        continue;
+      }
+      $value = $filter['value'] ?? NULL;
+      $values = is_array($value)
+        ? array_values(array_map('strval', array_filter($value, static fn ($item) => $item !== '' && $item !== NULL && $item !== FALSE && $item !== 'all')))
+        : (($value === NULL || $value === '') ? [] : [(string) $value]);
+      if (is_array($value) && array_keys($value) !== range(0, count($value) - 1) && count($values) === count($value)) {
+        // A `{tid: tid}` map keys and values the same thing.
+        $values = array_values(array_map('strval', array_keys($value)));
+      }
+      $row = [
+        'id' => (string) $filterId,
+        'field' => $field,
+        'table' => (string) ($filter['table'] ?? ''),
+        'plugin_id' => $pluginId,
+        'operator' => (string) ($filter['operator'] ?? ''),
+        'exposed' => (bool) ($filter['exposed'] ?? FALSE),
+        'label' => (string) ($filter['expose']['label'] ?? ''),
+        'identifier' => (string) ($filter['expose']['identifier'] ?? ''),
+        'values' => $values,
+      ];
+      if ($pluginId === 'taxonomy_index_tid') {
+        $row['vocabulary'] = (string) ($filter['vid'] ?? '');
+        $row['terms'] = $this->termLabels($values, $langcode);
+      }
+      $filters[] = $row;
+    }
+
+    $arguments = [];
+    foreach ((array) ($options['arguments'] ?? []) as $argumentId => $argument) {
+      if (!is_array($argument)) {
+        continue;
+      }
+      $arguments[] = [
+        'id' => (string) $argumentId,
+        'field' => (string) ($argument['field'] ?? $argumentId),
+        'table' => (string) ($argument['table'] ?? ''),
+        'plugin_id' => (string) ($argument['plugin_id'] ?? ''),
+        'default_action' => (string) ($argument['default_action'] ?? ''),
+        // `node`, `taxonomy_tid`, `current_user`, `query_parameter`, `fixed`
+        // …: what stands in when the URL carries no argument. `node` means
+        // "the page the block is on", which is what a contextual listing is.
+        'default_argument_type' => (string) ($argument['default_argument_type'] ?? ''),
+        'default_argument_options' => array_filter((array) ($argument['default_argument_options'] ?? []), 'is_scalar'),
+        'validate' => (string) ($argument['validate']['type'] ?? ''),
+      ];
+    }
+
+    $sorts = [];
+    foreach ((array) ($options['sorts'] ?? []) as $sortId => $sort) {
+      if (is_array($sort)) {
+        $sorts[] = [
+          'id' => (string) $sortId,
+          'field' => (string) ($sort['field'] ?? $sortId),
+          'order' => (string) ($sort['order'] ?? ''),
+          'exposed' => (bool) ($sort['exposed'] ?? FALSE),
+        ];
+      }
+    }
+
+    $pager = (array) ($options['pager'] ?? []);
+    $itemsPerPage = isset($pager['options']['items_per_page']) ? (int) $pager['options']['items_per_page'] : NULL;
+    if (isset($blockSettings['items_per_page']) && $blockSettings['items_per_page'] !== 'none' && $blockSettings['items_per_page'] !== '') {
+      // The placement may override the display's count.
+      $itemsPerPage = (int) $blockSettings['items_per_page'];
+    }
+
+    $baseEntityType = NULL;
+    if (str_starts_with($baseTable, 'search_api_index_')) {
+      $baseEntityType = 'search_api_index';
+    }
+    elseif ($this->entityTypeManager->hasDefinition($entityTypeId = preg_replace('/_field_data$|_field_revision$/', '', $baseTable) ?? '')) {
+      $baseEntityType = $entityTypeId;
+    }
+
+    return [
+      'id' => $view->id(),
+      'label' => (string) $view->label(),
+      'status' => (bool) $view->status(),
+      'display' => $displayId,
+      'display_title' => (string) ($displays[$displayId]['display_title'] ?? ''),
+      'block_description' => (string) ($options['block_description'] ?? ''),
+      'base_table' => $baseTable,
+      'base_entity_type' => $baseEntityType,
+      'search_api_index' => str_starts_with($baseTable, 'search_api_index_') ? substr($baseTable, strlen('search_api_index_')) : NULL,
+      'bundles' => $bundles,
+      'arguments' => $arguments,
+      'filters' => $filters,
+      'sorts' => $sorts,
+      'pager' => (string) ($pager['type'] ?? ''),
+      'items_per_page' => $itemsPerPage,
+      'offset' => (int) ($pager['options']['offset'] ?? 0),
+    ];
+  }
+
+  /**
+   * Term ids with their labels in the given language, missing ones skipped.
+   */
+  protected function termLabels(array $tids, string $langcode): array {
+    $tids = array_values(array_filter(array_map('intval', $tids)));
+    if (!$tids || !$this->entityTypeManager->hasDefinition('taxonomy_term')) {
+      return [];
+    }
+    $labels = [];
+    try {
+      foreach ($this->entityTypeManager->getStorage('taxonomy_term')->loadMultiple($tids) as $term) {
+        if ($term instanceof ContentEntityInterface && $term->hasTranslation($langcode)) {
+          $term = $term->getTranslation($langcode);
+        }
+        $labels[] = [
+          'tid' => (int) $term->id(),
+          'uuid' => (string) $term->uuid(),
+          'name' => (string) $term->label(),
+          'vocabulary' => (string) $term->bundle(),
+        ];
+      }
+    }
+    catch (\Exception $e) {
+      $this->loggerFactory->get('pagedesigner_export')->warning('Terms of a view filter could not be loaded: @message', ['@message' => $e->getMessage()]);
+    }
+    return $labels;
+  }
+
+  /**
    * Build a stable page tree export filename.
    *
    * @param string $entityTypeId
@@ -2533,6 +2793,14 @@ class Exporter {
     $linkedMedia = $this->linkedMediaIn($data['fields'] ?? [], $element->language()->getId(), $sanitizeLocalUrls);
     if ($linkedMedia) {
       $data['linked_media'] = $linkedMedia;
+    }
+
+    // A placed block was only an id to the consumer; resolved here to what
+    // the block IS (schema 0.18.0): for a views block, the display's base
+    // entity, its contextual arguments, filters and pager.
+    $block = $this->blockDescriptor($data['fields']['field_block'] ?? [], $element->language()->getId());
+    if ($block) {
+      $data['block'] = $block;
     }
 
     // Export children references.
