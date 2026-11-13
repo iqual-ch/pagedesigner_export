@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.18.0` (every version additive; consumers check the major only).
+Current schema version: `0.19.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,18 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.19.0` — what a site shows of an author
+
+Additive. Each account in `users` (and in a `get_users` page) may carry:
+
+```jsonc
+"first_name": "Jane", "last_name": "Doe",     // from the user fields whose names end in first_name / last_name
+"picture": { "url": "https://…/pictures/jane.jpg", "filename": "jane.jpg", "mime_type": "image/jpeg", "alt": "" }
+```
+
+Keys are left out when the account has no value. A page that shows its author
+shows a name and a portrait; `name` is the login, often an e-mail address.
 
 ## Schema `0.18.0` — placed blocks resolved
 

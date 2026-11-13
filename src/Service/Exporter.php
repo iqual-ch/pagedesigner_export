@@ -24,6 +24,7 @@ use Drupal\Component\Plugin\PluginManagerInterface;
 use Drupal\path_alias\AliasManagerInterface;
 use Drupal\pagedesigner\Entity\Element;
 use Drupal\user\EntityOwnerInterface;
+use Drupal\user\UserInterface;
 
 /**
  * Exports Pagedesigner element trees to JSON.
@@ -125,7 +126,11 @@ class Exporter {
   // page by uid / sid. A web request runs under the PHP memory and time
   // limits, and a site with 20 000 nodes cannot be described in one: the
   // unpaged calls exhausted 256 MB. Unpaged calls answer as before.
-  public const MIGRATION_SCHEMA_VERSION = '0.18.0';
+  // 0.19.0 adds what a site shows of an author to each account: `first_name`
+  // / `last_name` (from the user fields named that way) and `picture` (the
+  // account's `user_picture`). A page shows its author by name and portrait,
+  // and the account name alone is often just a login or an e-mail address.
+  public const MIGRATION_SCHEMA_VERSION = '0.19.0';
 
   /**
    * Entities loaded at once by the unpaged discovery loops.
@@ -836,7 +841,7 @@ class Exporter {
           'status' => (bool) $account->isActive(),
           'roles' => array_values(array_diff($account->getRoles(), ['authenticated'])),
           'created' => (int) $account->getCreatedTime(),
-        ];
+        ] + $this->userProfile($account);
       }
       $user_storage->resetCache($chunk);
     }
@@ -850,6 +855,43 @@ class Exporter {
       ];
     }
     return $result;
+  }
+
+  /**
+   * What a site shows of an author: a name in two parts and a portrait.
+   *
+   * Field names differ per site (`field_first_name`, `field_user_firstname`),
+   * so the two name parts are found by how the field name ends. The portrait
+   * is core's `user_picture`. Keys are left out when the account has no value.
+   */
+  protected function userProfile(UserInterface $account): array {
+    $profile = [];
+    foreach ($account->getFieldDefinitions() as $field_name => $definition) {
+      if (!in_array($definition->getType(), ['string', 'text'], TRUE)) {
+        continue;
+      }
+      $key = match (1) {
+        preg_match('/(^|_)first_?name$/', $field_name) => 'first_name',
+        preg_match('/(^|_)last_?name$/', $field_name) => 'last_name',
+        default => NULL,
+      };
+      $value = $key ? trim((string) $account->get($field_name)->value) : '';
+      if ($key && $value !== '' && !isset($profile[$key])) {
+        $profile[$key] = $value;
+      }
+    }
+    if ($account->hasField('user_picture') && !$account->get('user_picture')->isEmpty()) {
+      $file = $account->get('user_picture')->entity;
+      if ($file && $file->getFileUri()) {
+        $profile['picture'] = [
+          'url' => $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri()),
+          'filename' => (string) $file->getFilename(),
+          'mime_type' => (string) $file->getMimeType(),
+          'alt' => (string) ($account->get('user_picture')->alt ?? ''),
+        ];
+      }
+    }
+    return $profile;
   }
 
   /**
