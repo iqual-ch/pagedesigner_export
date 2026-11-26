@@ -130,7 +130,13 @@ class Exporter {
   // / `last_name` (from the user fields named that way) and `picture` (the
   // account's `user_picture`). A page shows its author by name and portrait,
   // and the account name alone is often just a login or an e-mail address.
-  public const MIGRATION_SCHEMA_VERSION = '0.19.0';
+  // 0.20.0 exports meta tag fields: every field of type `metatag` (whatever
+  // the project named it) is exported per translation as one item holding the
+  // decoded tag map, and listed in `field_definitions`. Before, SEO titles and
+  // descriptions an editor wrote by hand were silently dropped. Nodes only:
+  // for every other entity type (terms, media, users) the field is still
+  // skipped.
+  public const MIGRATION_SCHEMA_VERSION = '0.20.0';
 
   /**
    * Entities loaded at once by the unpaged discovery loops.
@@ -1211,6 +1217,9 @@ class Exporter {
     'menu_link', 'comment', 'revision_timestamp', 'revision_uid',
     'revision_log', 'revision_default', 'revision_translation_affected',
     'content_translation_source', 'content_translation_outdated',
+    // The computed base field of that name is the Metatag module's defaults
+    // for the entity, not an editor's input. The stored `metatag`-TYPE field
+    // (`field_meta_tags`, ...) is exported, see METATAG_FIELD_TYPE.
     'metatag',
   ];
 
@@ -1218,32 +1227,74 @@ class Exporter {
    * Field types that are plugin plumbing, never migratable content.
    *
    * SEO modules attach these under project-specific names
-   * (`field_meta_tags`, `field_yoast_seo`), so the type is the only stable
-   * way to recognise them.
+   * (`field_yoast_seo`), so the type is the only stable way to recognise them.
    */
-  protected const SKIP_FIELD_TYPES = ['metatag', 'yoast_seo'];
+  protected const SKIP_FIELD_TYPES = ['yoast_seo'];
 
   /**
-   * One translation's own field values, enriched and optionally sanitized.
+   * Field type of the Metatag module's stored per-entity overrides.
+   */
+  protected const METATAG_FIELD_TYPE = 'metatag';
+
+  /**
+   * Decode a stored meta tag value into a tag => value map.
    *
-   * Shared by plain entities and pagedesigner pages: a composition page's node
-   * carries content of its own (lead text, teaser image, documents) that the
-   * element tree knows nothing about, and the migration cannot map what was
-   * never exported.
+   * Metatag 1.x stores a PHP-serialized array, 2.x JSON. Empty tags are
+   * dropped (recursively, for nested values such as robots).
    *
-   * @param \Drupal\Core\Entity\ContentEntityInterface $translation
-   *   The entity in the language being exported.
-   * @param string $langcode
-   *   That language.
-   * @param bool $sanitizeLocalUrls
-   *   Whether to rewrite local URLs.
-   * @param string[] $additionalSkipFields
-   *   Extra field names to omit — a page's pagedesigner field, whose tree is
-   *   exported separately and must not be duplicated here.
+   * @param mixed $stored
+   *   The raw `value` of a metatag field item.
    *
    * @return array
-   *   Field name => field values.
+   *   Tag name => string or nested array; empty when nothing is set.
    */
+  protected function decodeMetatagValue(mixed $stored): array {
+    if (is_array($stored)) {
+      $data = $stored;
+    }
+    elseif (!is_string($stored) || trim($stored) === '') {
+      return [];
+    }
+    elseif (function_exists('metatag_data_decode')) {
+      $data = metatag_data_decode($stored);
+    }
+    else {
+      $data = @unserialize($stored, ['allowed_classes' => FALSE]);
+      if (!is_array($data)) {
+        $data = json_decode($stored, TRUE);
+      }
+    }
+    if (!is_array($data)) {
+      return [];
+    }
+    return $this->pruneEmptyTags($data);
+  }
+
+  /**
+   * Remove NULL, empty-string and empty-array entries recursively.
+   *
+   * The string "0" is a real value and stays.
+   */
+  protected function pruneEmptyTags(array $tags): array {
+    $result = [];
+    foreach ($tags as $name => $value) {
+      if (is_array($value)) {
+        $value = $this->pruneEmptyTags($value);
+        if ($value === []) {
+          continue;
+        }
+      }
+      elseif ($value === NULL || $value === '' || (is_string($value) && trim($value) === '')) {
+        continue;
+      }
+      elseif (!is_scalar($value)) {
+        continue;
+      }
+      $result[$name] = $value;
+    }
+    return $result;
+  }
+
   /**
    * Declared schema of the fields an entity exports.
    *
@@ -1259,11 +1310,14 @@ class Exporter {
    *   The entity in its default language.
    * @param string[] $additionalSkipFields
    *   Extra field names to omit, matching collectEntityFields().
+   * @param string[] $langcodes
+   *   The exported languages. A metatag field is listed only when one of them
+   *   carries tags, so the definitions agree with the exported values.
    *
    * @return array
    *   Field name => declared schema.
    */
-  protected function collectFieldDefinitions(ContentEntityInterface $entity, array $additionalSkipFields = []): array {
+  protected function collectFieldDefinitions(ContentEntityInterface $entity, array $additionalSkipFields = [], array $langcodes = []): array {
     $skipFields = array_merge(self::SKIP_FIELDS, $additionalSkipFields);
     $definitions = [];
     foreach ($entity->getFieldDefinitions() as $fieldName => $definition) {
@@ -1273,7 +1327,19 @@ class Exporter {
       if (in_array($definition->getType(), self::SKIP_FIELD_TYPES, TRUE)) {
         continue;
       }
-      if (!$entity->hasField($fieldName) || $entity->get($fieldName)->isEmpty()) {
+      $isMetatag = $this->isExportedMetatagField($entity, $definition);
+      if ($definition->getType() === self::METATAG_FIELD_TYPE && !$isMetatag) {
+        continue;
+      }
+      if (!$entity->hasField($fieldName)) {
+        continue;
+      }
+      if ($isMetatag) {
+        if (!$this->metatagFieldHasTags($entity, $fieldName, $langcodes)) {
+          continue;
+        }
+      }
+      elseif ($entity->get($fieldName)->isEmpty()) {
         continue;
       }
       $settings = $definition->getSettings();
@@ -1307,6 +1373,67 @@ class Exporter {
     return $definitions;
   }
 
+  /**
+   * The decoded tags a metatag field item list stores on this entity.
+   *
+   * Only the entity's own overrides: the stored items, never the Metatag
+   * module's computed defaults.
+   */
+  protected function metatagTagsOf(ContentEntityInterface $entity, string $fieldName): array {
+    $tags = [];
+    foreach ($entity->get($fieldName)->getValue() as $item) {
+      $tags = array_replace($tags, $this->decodeMetatagValue($item['value'] ?? NULL));
+    }
+    return $tags;
+  }
+
+  /**
+   * Whether an exported translation stores tags in the metatag field.
+   *
+   * Definitions are exported once per entity but the values per exported
+   * language: a field set only on a translation still needs its definition,
+   * and a field set only on a language that is not exported must not get one.
+   */
+  protected function metatagFieldHasTags(ContentEntityInterface $entity, string $fieldName, array $langcodes): bool {
+    foreach ($langcodes as $langcode) {
+      $translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity;
+      if ($translation->hasField($fieldName) && $this->metatagTagsOf($translation, $fieldName)) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * Whether a field is exported as meta tags: type metatag, on a node.
+   *
+   * Other entity types (terms, media, users, ...) keep skipping it.
+   */
+  protected function isExportedMetatagField(ContentEntityInterface $entity, FieldDefinitionInterface $definition): bool {
+    return $definition->getType() === self::METATAG_FIELD_TYPE && $entity->getEntityTypeId() === 'node';
+  }
+
+  /**
+   * One translation's own field values, enriched and optionally sanitized.
+   *
+   * Shared by plain entities and pagedesigner pages: a composition page's node
+   * carries content of its own (lead text, teaser image, documents) that the
+   * element tree knows nothing about, and the migration cannot map what was
+   * never exported.
+   *
+   * @param \Drupal\Core\Entity\ContentEntityInterface $translation
+   *   The entity in the language being exported.
+   * @param string $langcode
+   *   That language.
+   * @param bool $sanitizeLocalUrls
+   *   Whether to rewrite local URLs.
+   * @param string[] $additionalSkipFields
+   *   Extra field names to omit — a page's pagedesigner field, whose tree is
+   *   exported separately and must not be duplicated here.
+   *
+   * @return array
+   *   Field name => field values.
+   */
   protected function collectEntityFields(ContentEntityInterface $translation, string $langcode, bool $sanitizeLocalUrls, array $additionalSkipFields = []): array {
     $skipFields = array_merge(self::SKIP_FIELDS, $additionalSkipFields);
     $fields = [];
@@ -1317,7 +1444,19 @@ class Exporter {
       if (in_array($definition->getType(), self::SKIP_FIELD_TYPES, TRUE)) {
         continue;
       }
+      $isMetatag = $this->isExportedMetatagField($translation, $definition);
+      if ($definition->getType() === self::METATAG_FIELD_TYPE && !$isMetatag) {
+        continue;
+      }
       if (!$translation->hasField($fieldName) || $translation->get($fieldName)->isEmpty()) {
+        continue;
+      }
+      if ($isMetatag) {
+        // The decoded override map, one item; nothing when it holds no tag.
+        $tags = $this->metatagTagsOf($translation, $fieldName);
+        if ($tags) {
+          $fields[$fieldName] = [['value' => $tags]];
+        }
         continue;
       }
       $values = $translation->get($fieldName)->getValue();
@@ -1358,7 +1497,7 @@ class Exporter {
       'default_langcode' => $entry['default_langcode'],
       // Declared schema, once per entity: the values alone cannot tell a
       // consumer what field to create on the target.
-      'field_definitions' => $this->collectFieldDefinitions($entity),
+      'field_definitions' => $this->collectFieldDefinitions($entity, [], $entry['langcodes']),
       'translations' => $translations,
     ];
   }
@@ -2069,7 +2208,7 @@ class Exporter {
     // documents — and the migration cannot map what was never exported.
     if ($fields) {
       $metadata['fields'] = $fields;
-      $metadata['field_definitions'] = $this->collectFieldDefinitions($entity, $skipFields);
+      $metadata['field_definitions'] = $this->collectFieldDefinitions($entity, $skipFields, $langcodes);
     }
 
     $taxonomies = $this->buildTaxonomyAssignments($entity);

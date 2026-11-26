@@ -23,7 +23,7 @@ references.json    optional, later
 
 ## Manifest Schema
 
-Current schema version: `0.19.0` (every version additive; consumers check the major only).
+Current schema version: `0.20.0` (every version additive; consumers check the major only).
 
 The manifest must contain `schema_version`, `source`, and `pages`. Each page should include source entity metadata, language metadata, title/path maps, `pagedesigner_root_id`, `pagedesigner_field`, and `export_file`.
 
@@ -35,6 +35,32 @@ Schema `0.2.0` adds per page (all additive, omitted when empty):
 - `menu_links` — `[{menu_name, title, parent, weight, enabled}]`
 - `redirects` — `[{source, langcode, status_code}]` (requires the `redirect` module)
 - `content_hash` — sha1 of the page tree export, so re-exports can skip unchanged pages
+
+## Schema `0.20.0` — meta tag fields
+
+Additive. Every field of **type** `metatag` (the field name is the project's:
+`field_meta_tags`, `field_metatags`, `field_blog_metatags`) is exported for each
+translation that stores tags, in `fields.<langcode>.<field_name>` and, with
+`type: "metatag"`, in `field_definitions`. The value is one item holding the
+stored value decoded into a map (Metatag 1.x PHP-serialized or 2.x JSON):
+
+```jsonc
+"field_meta_tags": [{ "value": { "description": "…", "robots": { "noindex": "noindex" } } }]
+```
+
+- Only the entity's own overrides are exported, never the computed defaults, and
+  never the computed base field named `metatag` (still skipped by name).
+- Empty tags are dropped; when nothing is left the field is omitted for that
+  translation (and from `field_definitions` when no translation has tags).
+- Nodes only: for every other entity type (terms, media, users, ...) fields of
+  type `metatag` are still skipped.
+- `field_definitions` lists the field only when one of the exported languages
+  carries tags, so definitions and values always agree.
+- Field type `yoast_seo` is still skipped.
+- Carried by plain entities (`entities/*.json`, `get_entities`) and by the page
+  manifest entries (`pages[].fields` / `field_definitions`, also in a paged
+  `get_migration_manifest`), since all of them go through the same field
+  collection.
 
 ## Schema `0.19.0` — what a site shows of an author
 
